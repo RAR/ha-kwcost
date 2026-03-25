@@ -14,7 +14,6 @@ from .const import (
     DOMAIN,
     CONF_EMAIL,
     CONF_PASSWORD,
-    CONF_API_KEY,
     CONF_JURISDICTION,
     CONF_CATEGORY,
     CONF_SCHEDULE,
@@ -34,7 +33,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session,
         entry.data[CONF_EMAIL],
         entry.data[CONF_PASSWORD],
-        entry.data.get(CONF_API_KEY, ""),
     )
 
     rate_coordinator = KwcostRateCoordinator(

@@ -7,7 +7,6 @@
         "data": {
           "email": "Email",
           "password": "Password",
-          "api_key": "API Key (optional)"
         }
       },
       "schedule": {
