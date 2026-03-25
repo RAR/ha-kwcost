@@ -6,7 +6,8 @@
         "description": "Enter your kwcost.com account credentials.",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password",
+          "api_key": "API Key (optional)"
         }
       },
       "schedule": {
@@ -66,6 +67,9 @@
       },
       "grid_export_credit": {
         "name": "Grid Export Credit (TOU)"
+      },
+      "tariff_forecast": {
+        "name": "Tariff Forecast"
       }
     }
   }

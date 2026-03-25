@@ -30,7 +30,7 @@ from .const import (
     CONF_OPTIONAL_RIDERS,
     CONF_NAMEPLATE_KW,
 )
-from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator
+from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator, KwcostTariffCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ async def async_setup_entry(
     coordinators = hass.data[DOMAIN][entry.entry_id]
     rate_coordinator: KwcostRateCoordinator = coordinators["rate"]
     tou_coordinator: KwcostTouCoordinator | None = coordinators.get("tou")
+    tariff_coordinator: KwcostTariffCoordinator | None = coordinators.get("tariff")
 
     entities: list[SensorEntity] = [
         KwcostBaseRateSensor(rate_coordinator, entry, tou_coordinator),
@@ -73,6 +74,9 @@ async def async_setup_entry(
                 KwcostTouSeasonSensor(tou_coordinator, entry),
             ]
         )
+
+    if tariff_coordinator is not None:
+        entities.append(KwcostTariffForecastSensor(tariff_coordinator, entry))
 
     # Cost tracking sensors based on user-selected energy sensors
     grid_in_entity = entry.data.get(CONF_GRID_ENERGY_IN)
@@ -733,3 +737,48 @@ class KwcostOptionalRiderSensor(
                 if min_bill:
                     attrs[f"{code}_minimum_bill"] = min_bill
         return attrs
+
+
+class KwcostTariffForecastSensor(
+    CoordinatorEntity[KwcostTariffCoordinator], SensorEntity
+):
+    """EVCC-compatible tariff forecast with hourly prices in attributes.
+
+    The state is the current hour's price in $/kWh.  The `forecast`
+    attribute contains the full array of {start, end, value} slots
+    that EVCC and similar consumers can read directly.
+    """
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "$/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-timeline-variant"
+
+    def __init__(
+        self,
+        coordinator: KwcostTariffCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_tariff_forecast"
+        self._attr_device_info = _device_info(entry)
+        self._attr_translation_key = "tariff_forecast"
+
+    @property
+    def native_value(self) -> float | None:
+        if not self.coordinator.data:
+            return None
+        # First slot is the current hour's price
+        return self.coordinator.data[0]["value"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not self.coordinator.data:
+            return {}
+        return {
+            "forecast": self.coordinator.data,
+            "slots": len(self.coordinator.data),
+            "schedule": self.coordinator.tou_schedule,
+            "jurisdiction": self.coordinator.jurisdiction,
+            "rate_schedule": self.coordinator.rate_schedule,
+        }

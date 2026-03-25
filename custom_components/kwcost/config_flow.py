@@ -25,6 +25,7 @@ from .const import (
     DOMAIN,
     CONF_EMAIL,
     CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_JURISDICTION,
     CONF_CATEGORY,
     CONF_SCHEDULE,
@@ -56,6 +57,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
         self._client: KwcostApiClient | None = None
         self._email: str = ""
         self._password: str = ""
+        self._api_key: str = ""
         self._jurisdictions: dict[str, Any] = {}
         self._tou_schedules: dict[str, Any] = {}
         self._schedule_data: dict[str, Any] = {}
@@ -70,9 +72,12 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._email = user_input[CONF_EMAIL]
             self._password = user_input[CONF_PASSWORD]
+            self._api_key = user_input.get(CONF_API_KEY, "")
 
             session = async_get_clientsession(self.hass)
-            self._client = KwcostApiClient(session, self._email, self._password)
+            self._client = KwcostApiClient(
+                session, self._email, self._password, self._api_key
+            )
 
             try:
                 await self._client.async_validate()
@@ -97,6 +102,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_EMAIL): str,
                     vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(CONF_API_KEY, default=""): str,
                 }
             ),
             errors=errors,
@@ -195,6 +201,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             data = {
                 CONF_EMAIL: self._email,
                 CONF_PASSWORD: self._password,
+                CONF_API_KEY: self._api_key,
                 **self._schedule_data,
             }
             data[CONF_INCLUDE_RIDERS] = user_input.get(CONF_INCLUDE_RIDERS, True)
@@ -290,6 +297,7 @@ class KwcostOptionsFlow(OptionsFlow):
             session,
             self._config_entry.data[CONF_EMAIL],
             self._config_entry.data[CONF_PASSWORD],
+            self._config_entry.data.get(CONF_API_KEY, ""),
         )
         try:
             riders_resp = await client.async_get_riders(

@@ -14,12 +14,13 @@ from .const import (
     DOMAIN,
     CONF_EMAIL,
     CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_JURISDICTION,
     CONF_CATEGORY,
     CONF_SCHEDULE,
     CONF_TOU_SCHEDULE,
 )
-from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator
+from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator, KwcostTariffCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session,
         entry.data[CONF_EMAIL],
         entry.data[CONF_PASSWORD],
+        entry.data.get(CONF_API_KEY, ""),
     )
 
     rate_coordinator = KwcostRateCoordinator(
@@ -51,6 +53,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         tou_coordinator = KwcostTouCoordinator(hass, client, tou_schedule)
         await tou_coordinator.async_config_entry_first_refresh()
         coordinators["tou"] = tou_coordinator
+
+        tariff_coordinator = KwcostTariffCoordinator(
+            hass,
+            client,
+            tou_schedule,
+            entry.data[CONF_JURISDICTION],
+            entry.data[CONF_CATEGORY],
+            entry.data[CONF_SCHEDULE],
+        )
+        await tariff_coordinator.async_config_entry_first_refresh()
+        coordinators["tariff"] = tariff_coordinator
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinators
 

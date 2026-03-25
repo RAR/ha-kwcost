@@ -6,7 +6,8 @@
         "description": "Enter your kwcost.com account credentials.",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password",
+          "api_key": "API Key (optional)"
         }
       },
       "schedule": {
@@ -86,6 +87,9 @@
       },
       "optional_rider_charges": {
         "name": "Optional Rider Charges"
+      },
+      "tariff_forecast": {
+        "name": "Tariff Forecast"
       }
     }
   }

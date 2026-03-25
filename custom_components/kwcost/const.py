@@ -4,6 +4,7 @@ DOMAIN = "kwcost"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
+CONF_API_KEY = "api_key"
 CONF_JURISDICTION = "jurisdiction"
 CONF_CATEGORY = "category"
 CONF_SCHEDULE = "schedule"
@@ -21,3 +22,4 @@ API_BASE_URL = "https://api.kwcost.com"
 # Update intervals (seconds)
 UPDATE_INTERVAL_RATES = 86400  # 24 hours — rates rarely change
 UPDATE_INTERVAL_TOU = 300  # 5 minutes — TOU period can change
+UPDATE_INTERVAL_TARIFF = 3600  # 1 hour — tariff forecast refresh

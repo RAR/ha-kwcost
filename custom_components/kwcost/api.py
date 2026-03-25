@@ -23,10 +23,13 @@ class KwcostAuthError(KwcostApiError):
 class KwcostApiClient:
     """Async client for the kwcost API."""
 
-    def __init__(self, session: ClientSession, email: str, password: str) -> None:
+    def __init__(
+        self, session: ClientSession, email: str, password: str, api_key: str = ""
+    ) -> None:
         self._session = session
         self._email = email
         self._password = password
+        self._api_key = api_key
         self._token: str | None = None
 
     async def _authenticate(self) -> None:
@@ -49,6 +52,8 @@ class KwcostApiClient:
             await self._authenticate()
 
         headers = {"Authorization": f"Bearer {self._token}"}
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
         resp = await self._session.request(
             method, f"{API_BASE_URL}{path}", headers=headers, **kwargs
         )
@@ -57,6 +62,8 @@ class KwcostApiClient:
             # Token expired — re-authenticate and retry once
             await self._authenticate()
             headers = {"Authorization": f"Bearer {self._token}"}
+            if self._api_key:
+                headers["x-api-key"] = self._api_key
             resp = await self._session.request(
                 method, f"{API_BASE_URL}{path}", headers=headers, **kwargs
             )
@@ -125,6 +132,27 @@ class KwcostApiClient:
         if municipality:
             body["municipality"] = municipality
         return await self._request("POST", "/calculate/cost", json=body)
+
+    async def async_get_tariff_forecast(
+        self,
+        tou_schedule: str,
+        jurisdiction: str,
+        category: str,
+        rate_schedule: str,
+        hours: int = 48,
+    ) -> list[dict[str, Any]]:
+        """GET /tou/tariff/forecast — EVCC-compatible hourly price forecast."""
+        return await self._request(
+            "GET",
+            "/tou/tariff/forecast",
+            params={
+                "schedule": tou_schedule,
+                "jurisdiction": jurisdiction,
+                "category": category,
+                "rate_schedule": rate_schedule,
+                "hours": str(hours),
+            },
+        )
 
     async def async_validate(self) -> bool:
         """Validate credentials by attempting login."""
