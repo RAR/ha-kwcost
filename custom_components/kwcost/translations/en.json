@@ -6,7 +6,7 @@
         "description": "Enter your kwcost.com account credentials.",
         "data": {
           "email": "Email",
-          "password": "Password",
+          "password": "Password"
         }
       },
       "schedule": {
