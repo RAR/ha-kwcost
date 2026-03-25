@@ -21,10 +21,12 @@
         }
       },
       "energy": {
-        "title": "Energy Sensors (Optional)",
-        "description": "Select energy sensors to track cost. Grid Energy In calculates your import cost. Grid Energy Out calculates export credit (TOU-aware if a TOU schedule is configured).",
+        "title": "Energy & Rider Options",
+        "description": "Include mandatory riders, select any optional riders (solar, net metering), and choose energy sensors for cost tracking.",
         "data": {
           "include_riders": "Include mandatory riders in cost calculation",
+          "optional_riders": "Optional riders (solar, net metering, etc.)",
+          "nameplate_capacity_kw": "Solar system size (kW)",
           "grid_energy_in_entity": "Grid Energy In sensor",
           "grid_energy_out_entity": "Grid Energy Out sensor"
         }
@@ -66,6 +68,9 @@
       },
       "grid_export_credit": {
         "name": "Grid Export Credit (TOU)"
+      },
+      "optional_rider_charges": {
+        "name": "Optional Rider Charges"
       }
     }
   }

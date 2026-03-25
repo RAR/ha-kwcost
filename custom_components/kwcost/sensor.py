@@ -27,6 +27,8 @@ from .const import (
     CONF_GRID_ENERGY_IN,
     CONF_GRID_ENERGY_OUT,
     CONF_INCLUDE_RIDERS,
+    CONF_OPTIONAL_RIDERS,
+    CONF_NAMEPLATE_KW,
 )
 from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator
 
@@ -75,6 +77,8 @@ async def async_setup_entry(
     # Cost tracking sensors based on user-selected energy sensors
     grid_in_entity = entry.data.get(CONF_GRID_ENERGY_IN)
     include_riders = entry.data.get(CONF_INCLUDE_RIDERS, True)
+    optional_riders = entry.data.get(CONF_OPTIONAL_RIDERS, [])
+    nameplate_kw = entry.data.get(CONF_NAMEPLATE_KW, 0.0)
     if grid_in_entity:
         entities.append(
             KwcostGridCostSensor(
@@ -90,6 +94,7 @@ async def async_setup_entry(
             KwcostGridExportCreditSensor(
                 hass, rate_coordinator, tou_coordinator, entry, grid_out_entity,
                 include_riders=include_riders,
+                optional_riders=optional_riders,
             )
         )
     elif grid_out_entity:
@@ -98,6 +103,14 @@ async def async_setup_entry(
             KwcostGridCostSensor(
                 hass, rate_coordinator, entry, grid_out_entity, is_export=True,
                 include_riders=include_riders,
+            )
+        )
+
+    # Optional rider monthly charges sensor
+    if optional_riders:
+        entities.append(
+            KwcostOptionalRiderSensor(
+                rate_coordinator, entry, optional_riders, nameplate_kw
             )
         )
 
@@ -363,6 +376,30 @@ def _get_rider_adder(coordinator: KwcostRateCoordinator) -> float:
     return total_cents / 100.0  # convert ¢/kWh → $/kWh
 
 
+def _get_export_credit_rate(
+    coordinator: KwcostRateCoordinator,
+    optional_rider_codes: list[str],
+) -> float | None:
+    """Get per-kWh export credit rate from an optional solar/net metering rider.
+
+    Checks for RSC, NMB, NM in order of priority and returns the credit
+    value if the rider is selected and present in the coordinator data.
+    Returns None if no applicable rider credit rate is found.
+    """
+    if not coordinator.data or not optional_rider_codes:
+        return None
+    optional = coordinator.data.get("riders", {}).get("optional_riders", {})
+    # Check selected riders in priority order
+    for code in ("RSC", "NMB", "NM"):
+        if code not in optional_rider_codes:
+            continue
+        rider = optional.get(code, {})
+        for charge in rider.get("charges", []):
+            if charge.get("type") == "credit" and charge.get("unit") == "per_kwh":
+                return charge["value"]
+    return None
+
+
 class KwcostGridCostSensor(RestoreEntity, SensorEntity):
     """Tracks cumulative cost of grid energy imported (or exported at flat rate).
 
@@ -504,12 +541,14 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         entry: ConfigEntry,
         source_entity: str,
         include_riders: bool = True,
+        optional_riders: list[str] | None = None,
     ) -> None:
         self.hass = hass
         self._rate_coordinator = rate_coordinator
         self._tou_coordinator = tou_coordinator
         self._source_entity = source_entity
         self._include_riders = include_riders
+        self._optional_riders = optional_riders or []
         self._accumulated_credit: float = 0.0
         self._last_energy_value: float | None = None
         self._unsub: Any = None
@@ -547,15 +586,21 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         except (ValueError, TypeError):
             return
 
-        # Use TOU-aware rate
-        rate = _get_tou_rate(self._rate_coordinator, self._tou_coordinator)
-        if rate is None:
-            rate = _get_flat_rate(self._rate_coordinator)
-        if rate is None:
-            return
-
-        if self._include_riders:
-            rate += _get_rider_adder(self._rate_coordinator)
+        # Prefer rider-specific export credit rate (RSC/NMB/NM)
+        rider_credit = _get_export_credit_rate(
+            self._rate_coordinator, self._optional_riders
+        )
+        if rider_credit is not None:
+            rate = rider_credit
+        else:
+            # Fall back to TOU-aware retail rate
+            rate = _get_tou_rate(self._rate_coordinator, self._tou_coordinator)
+            if rate is None:
+                rate = _get_flat_rate(self._rate_coordinator)
+            if rate is None:
+                return
+            if self._include_riders:
+                rate += _get_rider_adder(self._rate_coordinator)
 
         if self._last_energy_value is not None:
             delta = new_energy - self._last_energy_value
@@ -577,17 +622,96 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         tou_period = None
         if self._tou_coordinator.data:
             tou_period = self._tou_coordinator.data.get("period")
-        base_rate = _get_tou_rate(
-            self._rate_coordinator, self._tou_coordinator
+
+        rider_credit = _get_export_credit_rate(
+            self._rate_coordinator, self._optional_riders
         )
-        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
-        all_in_rate = (base_rate + rider_adder) if base_rate is not None else None
+        if rider_credit is not None:
+            effective_rate = rider_credit
+            rate_source = "rider_credit"
+        else:
+            effective_rate = _get_tou_rate(
+                self._rate_coordinator, self._tou_coordinator
+            )
+            rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+            if effective_rate is not None:
+                effective_rate += rider_adder
+            rate_source = "retail_rate"
+
         return {
             "source_entity": self._source_entity,
-            "base_rate_per_kwh": base_rate,
-            "rider_adder_per_kwh": round(rider_adder, 6),
-            "current_rate_per_kwh": round(all_in_rate, 6) if all_in_rate is not None else None,
+            "credit_rate_per_kwh": round(effective_rate, 6) if effective_rate is not None else None,
+            "rate_source": rate_source,
+            "optional_riders": self._optional_riders,
             "include_riders": self._include_riders,
             "current_tou_period": tou_period,
             "last_energy_value": self._last_energy_value,
         }
+
+
+class KwcostOptionalRiderSensor(
+    CoordinatorEntity[KwcostRateCoordinator], SensorEntity
+):
+    """Shows selected optional rider details and estimated monthly fixed charges."""
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "$"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:solar-panel"
+
+    def __init__(
+        self,
+        coordinator: KwcostRateCoordinator,
+        entry: ConfigEntry,
+        optional_rider_codes: list[str],
+        nameplate_kw: float,
+    ) -> None:
+        super().__init__(coordinator)
+        self._rider_codes = optional_rider_codes
+        self._nameplate_kw = nameplate_kw
+        self._attr_unique_id = f"{entry.entry_id}_optional_riders"
+        self._attr_device_info = _device_info(entry)
+        self._attr_translation_key = "optional_rider_charges"
+
+    @property
+    def native_value(self) -> float | None:
+        """Estimated monthly fixed charges from selected optional riders."""
+        if not self.coordinator.data:
+            return None
+        optional = self.coordinator.data.get("riders", {}).get("optional_riders", {})
+        total = 0.0
+        for code in self._rider_codes:
+            rider = optional.get(code, {})
+            for charge in rider.get("charges", []):
+                if charge.get("type") != "charge":
+                    continue
+                value = charge.get("value", 0)
+                unit = charge.get("unit", "")
+                if unit == "fixed":
+                    total += value
+                elif unit == "per_kw" and self._nameplate_kw > 0:
+                    total += value * self._nameplate_kw
+        return round(total, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not self.coordinator.data:
+            return {"selected_riders": self._rider_codes}
+        optional = self.coordinator.data.get("riders", {}).get("optional_riders", {})
+        attrs: dict[str, Any] = {
+            "selected_riders": self._rider_codes,
+            "nameplate_capacity_kw": self._nameplate_kw,
+        }
+        for code in self._rider_codes:
+            rider = optional.get(code, {})
+            if rider:
+                attrs[f"{code}_name"] = rider.get("name", code)
+                for charge in rider.get("charges", []):
+                    desc = charge.get("description", "charge")
+                    key = f"{code}_{desc[:40].lower().replace(' ', '_')}"
+                    attrs[key] = charge.get("value")
+                min_bill = rider.get("minimum_bill_dollars")
+                if min_bill:
+                    attrs[f"{code}_minimum_bill"] = min_bill
+        return attrs

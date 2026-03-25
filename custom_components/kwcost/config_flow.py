@@ -12,7 +12,14 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import KwcostApiClient, KwcostAuthError, KwcostApiError
-from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    SelectOptionDict,
+)
 
 from .const import (
     DOMAIN,
@@ -27,6 +34,8 @@ from .const import (
     CONF_GRID_ENERGY_IN,
     CONF_GRID_ENERGY_OUT,
     CONF_INCLUDE_RIDERS,
+    CONF_OPTIONAL_RIDERS,
+    CONF_NAMEPLATE_KW,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +53,8 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
         self._password: str = ""
         self._jurisdictions: dict[str, Any] = {}
         self._tou_schedules: dict[str, Any] = {}
+        self._schedule_data: dict[str, Any] = {}
+        self._available_optional_riders: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -117,6 +128,18 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_STATE: state,
                 CONF_MUNICIPALITY: user_input.get(CONF_MUNICIPALITY, ""),
             }
+
+            # Fetch optional riders for this jurisdiction/category/schedule
+            try:
+                riders_resp = await self._client.async_get_riders(
+                    jurisdiction, category, schedule
+                )
+                self._available_optional_riders = riders_resp.get(
+                    "optional_riders", {}
+                )
+            except (KwcostApiError, aiohttp.ClientError):
+                self._available_optional_riders = {}
+
             return await self.async_step_energy()
 
         # Build dropdown options from fetched data
@@ -162,7 +185,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_energy(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 3: Optionally select energy sensors for cost tracking."""
+        """Step 3: Optionally select energy sensors, optional riders, and system info."""
         if user_input is not None:
             data = {
                 CONF_EMAIL: self._email,
@@ -170,6 +193,12 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 **self._schedule_data,
             }
             data[CONF_INCLUDE_RIDERS] = user_input.get(CONF_INCLUDE_RIDERS, True)
+            selected_riders = user_input.get(CONF_OPTIONAL_RIDERS, [])
+            if selected_riders:
+                data[CONF_OPTIONAL_RIDERS] = selected_riders
+            nameplate = user_input.get(CONF_NAMEPLATE_KW)
+            if nameplate:
+                data[CONF_NAMEPLATE_KW] = nameplate
             if user_input.get(CONF_GRID_ENERGY_IN):
                 data[CONF_GRID_ENERGY_IN] = user_input[CONF_GRID_ENERGY_IN]
             if user_input.get(CONF_GRID_ENERGY_OUT):
@@ -186,14 +215,38 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         )
 
+        schema_fields: dict[vol.Marker, Any] = {
+            vol.Optional(CONF_INCLUDE_RIDERS, default=True): bool,
+        }
+
+        # Build optional rider multi-select if any are available
+        if self._available_optional_riders:
+            rider_options = [
+                SelectOptionDict(
+                    value=code,
+                    label=info.get("name", code) if isinstance(info, dict) else code,
+                )
+                for code, info in self._available_optional_riders.items()
+            ]
+            schema_fields[vol.Optional(CONF_OPTIONAL_RIDERS, default=[])] = (
+                SelectSelector(
+                    SelectSelectorConfig(
+                        options=rider_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+            )
+            schema_fields[vol.Optional(CONF_NAMEPLATE_KW)] = vol.Coerce(float)
+
+        schema_fields[vol.Optional(CONF_GRID_ENERGY_IN)] = energy_selector
+        schema_fields[vol.Optional(CONF_GRID_ENERGY_OUT)] = energy_selector
+
         return self.async_show_form(
             step_id="energy",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_INCLUDE_RIDERS, default=True): bool,
-                    vol.Optional(CONF_GRID_ENERGY_IN): energy_selector,
-                    vol.Optional(CONF_GRID_ENERGY_OUT): energy_selector,
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
+            description_placeholders={
+                "nameplate_help": "System size in kW (for non-bypassable charges)"
+            },
             errors={},
         )
