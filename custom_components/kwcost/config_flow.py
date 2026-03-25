@@ -8,7 +8,7 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import KwcostApiClient, KwcostAuthError, KwcostApiError
@@ -45,6 +45,11 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kilowatt Cost."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Return the options flow handler."""
+        return KwcostOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -249,4 +254,106 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 "nameplate_help": "System size in kW (for non-bypassable charges)"
             },
             errors={},
+        )
+
+
+class KwcostOptionsFlow(OptionsFlow):
+    """Handle options for an existing Kilowatt Cost entry."""
+
+    def __init__(self, config_entry) -> None:
+        self._config_entry = config_entry
+        self._available_optional_riders: dict[str, Any] = {}
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Main options step — reconfigure riders, energy sensors, and system info."""
+        if user_input is not None:
+            # Merge updated options into entry data
+            new_data = {**self._config_entry.data}
+            new_data[CONF_INCLUDE_RIDERS] = user_input.get(CONF_INCLUDE_RIDERS, True)
+            new_data[CONF_OPTIONAL_RIDERS] = user_input.get(CONF_OPTIONAL_RIDERS, [])
+            nameplate = user_input.get(CONF_NAMEPLATE_KW)
+            new_data[CONF_NAMEPLATE_KW] = nameplate if nameplate else 0.0
+            new_data[CONF_GRID_ENERGY_IN] = user_input.get(CONF_GRID_ENERGY_IN, "")
+            new_data[CONF_GRID_ENERGY_OUT] = user_input.get(CONF_GRID_ENERGY_OUT, "")
+
+            self.hass.config_entries.async_update_entry(
+                self._config_entry, data=new_data
+            )
+            # Return empty options — we store everything in data
+            return self.async_create_entry(title="", data={})
+
+        # Fetch optional riders from API for the dropdown
+        session = async_get_clientsession(self.hass)
+        client = KwcostApiClient(
+            session,
+            self._config_entry.data[CONF_EMAIL],
+            self._config_entry.data[CONF_PASSWORD],
+        )
+        try:
+            riders_resp = await client.async_get_riders(
+                self._config_entry.data[CONF_JURISDICTION],
+                self._config_entry.data.get(CONF_CATEGORY, "residential"),
+                self._config_entry.data[CONF_SCHEDULE],
+            )
+            self._available_optional_riders = riders_resp.get("optional_riders", {})
+        except (KwcostApiError, aiohttp.ClientError):
+            self._available_optional_riders = {}
+
+        current = self._config_entry.data
+        energy_selector = EntitySelector(
+            EntitySelectorConfig(domain="sensor", device_class="energy")
+        )
+
+        schema_fields: dict[vol.Marker, Any] = {
+            vol.Optional(
+                CONF_INCLUDE_RIDERS,
+                default=current.get(CONF_INCLUDE_RIDERS, True),
+            ): bool,
+        }
+
+        if self._available_optional_riders:
+            rider_options = [
+                SelectOptionDict(
+                    value=code,
+                    label=info.get("name", code) if isinstance(info, dict) else code,
+                )
+                for code, info in self._available_optional_riders.items()
+            ]
+            schema_fields[
+                vol.Optional(
+                    CONF_OPTIONAL_RIDERS,
+                    default=current.get(CONF_OPTIONAL_RIDERS, []),
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=rider_options,
+                    multiple=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+            schema_fields[
+                vol.Optional(
+                    CONF_NAMEPLATE_KW,
+                    default=current.get(CONF_NAMEPLATE_KW, 0.0),
+                )
+            ] = vol.Coerce(float)
+
+        schema_fields[
+            vol.Optional(
+                CONF_GRID_ENERGY_IN,
+                default=current.get(CONF_GRID_ENERGY_IN, ""),
+            )
+        ] = energy_selector
+        schema_fields[
+            vol.Optional(
+                CONF_GRID_ENERGY_OUT,
+                default=current.get(CONF_GRID_ENERGY_OUT, ""),
+            )
+        ] = energy_selector
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(schema_fields),
         )

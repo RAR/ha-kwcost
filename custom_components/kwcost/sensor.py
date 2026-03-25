@@ -231,6 +231,7 @@ class KwcostScheduleNameSensor(CoordinatorEntity[KwcostRateCoordinator], SensorE
         self, coordinator: KwcostRateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_schedule_name"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "schedule_name"
@@ -244,6 +245,23 @@ class KwcostScheduleNameSensor(CoordinatorEntity[KwcostRateCoordinator], SensorE
             .get("details", {})
             .get("name")
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "jurisdiction": self._entry.data.get(CONF_JURISDICTION),
+            "category": self._entry.data.get("category"),
+            "schedule_code": self._entry.data.get(CONF_SCHEDULE),
+            "tou_schedule": self._entry.data.get(CONF_TOU_SCHEDULE, ""),
+            "include_riders": self._entry.data.get(CONF_INCLUDE_RIDERS, True),
+        }
+        optional = self._entry.data.get(CONF_OPTIONAL_RIDERS, [])
+        if optional:
+            attrs["optional_riders"] = optional
+        nameplate = self._entry.data.get(CONF_NAMEPLATE_KW)
+        if nameplate:
+            attrs["nameplate_capacity_kw"] = nameplate
+        return attrs
 
 
 class KwcostBaseFacilityChargeSensor(

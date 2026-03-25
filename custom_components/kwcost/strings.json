@@ -40,6 +40,21 @@
       "already_configured": "This rate schedule is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Reconfigure Kilowatt Cost",
+        "description": "Update rider selections, solar system size, and energy sensors.",
+        "data": {
+          "include_riders": "Include mandatory riders in cost calculation",
+          "optional_riders": "Optional riders (solar, net metering, etc.)",
+          "nameplate_capacity_kw": "Solar system size (kW)",
+          "grid_energy_in_entity": "Grid Energy In sensor",
+          "grid_energy_out_entity": "Grid Energy Out sensor"
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "base_rate": {
