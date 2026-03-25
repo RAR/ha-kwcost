@@ -83,7 +83,8 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self._client.async_validate()
             except KwcostAuthError:
                 errors["base"] = "invalid_auth"
-            except (KwcostApiError, aiohttp.ClientError):
+            except (KwcostApiError, aiohttp.ClientError) as err:
+                _LOGGER.error("Login failed: %s", err)
                 errors["base"] = "cannot_connect"
             else:
                 # Fetch jurisdictions and TOU schedules for step 2
@@ -91,7 +92,8 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                     rates_data = await self._client.async_get_jurisdictions()
                     self._jurisdictions = rates_data.get("jurisdictions", {})
                     self._tou_schedules = await self._client.async_get_tou_schedules()
-                except (KwcostApiError, aiohttp.ClientError):
+                except (KwcostApiError, aiohttp.ClientError) as err:
+                    _LOGGER.error("Data fetch failed: %s", err)
                     errors["base"] = "cannot_connect"
                 else:
                     return await self.async_step_schedule()
