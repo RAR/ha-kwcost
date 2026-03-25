@@ -277,7 +277,7 @@ class KwcostBaseFacilityChargeSensor(
     _attr_native_unit_of_measurement = "$"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_icon = "mdi:home-currency-usd"
+    _attr_icon = "mdi:cash-lock"
 
     def __init__(
         self, coordinator: KwcostRateCoordinator, entry: ConfigEntry
