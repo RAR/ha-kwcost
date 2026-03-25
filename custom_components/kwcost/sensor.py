@@ -713,15 +713,18 @@ class KwcostOptionalRiderSensor(
         total = 0.0
         for code in self._rider_codes:
             rider = optional.get(code, {})
-            for charge in rider.get("charges", []):
-                if charge.get("type") != "charge":
-                    continue
-                value = charge.get("value", 0)
-                unit = charge.get("unit", "")
-                if unit == "fixed":
-                    total += value
-                elif unit == "per_kw" and self._nameplate_kw > 0:
-                    total += value * self._nameplate_kw
+            # Fixed charges are a flat dict: {"daily_service_charge_dollars": 0.48, ...}
+            fixed = rider.get("fixed_charges", {})
+            if isinstance(fixed, dict):
+                for _key, value in fixed.items():
+                    if isinstance(value, (int, float)):
+                        total += value
+            # Also check charges dict for per-kW items
+            charges = rider.get("charges", {})
+            if isinstance(charges, dict):
+                for key, value in charges.items():
+                    if "per_kw" in key and isinstance(value, (int, float)) and self._nameplate_kw > 0:
+                        total += value * self._nameplate_kw
         return round(total, 2)
 
     @property
@@ -737,10 +740,16 @@ class KwcostOptionalRiderSensor(
             rider = optional.get(code, {})
             if rider:
                 attrs[f"{code}_name"] = rider.get("name", code)
-                for charge in rider.get("charges", []):
-                    desc = charge.get("description", "charge")
-                    key = f"{code}_{desc[:40].lower().replace(' ', '_')}"
-                    attrs[key] = charge.get("value")
+                charges = rider.get("charges", {})
+                if isinstance(charges, dict):
+                    for key, value in charges.items():
+                        attr_key = f"{code}_{key}"
+                        attrs[attr_key] = value
+                fixed = rider.get("fixed_charges", {})
+                if isinstance(fixed, dict):
+                    for key, value in fixed.items():
+                        attr_key = f"{code}_{key}"
+                        attrs[attr_key] = value
                 min_bill = rider.get("minimum_bill_dollars")
                 if min_bill:
                     attrs[f"{code}_minimum_bill"] = min_bill
