@@ -1,0 +1,71 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Kilowatt Cost API Credentials",
+        "description": "Enter your kwcost.com account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "schedule": {
+        "title": "Select Rate Schedule",
+        "description": "Choose your jurisdiction, rate schedule, and optional TOU schedule.",
+        "data": {
+          "jurisdiction": "Jurisdiction",
+          "category": "Category",
+          "schedule": "Rate Schedule",
+          "tou_schedule": "TOU Schedule (optional)",
+          "municipality": "Municipality (optional)"
+        }
+      },
+      "energy": {
+        "title": "Energy Sensors (Optional)",
+        "description": "Select energy sensors to track cost. Grid Energy In calculates your import cost. Grid Energy Out calculates export credit (TOU-aware if a TOU schedule is configured).",
+        "data": {
+          "grid_energy_in_entity": "Grid Energy In sensor",
+          "grid_energy_out_entity": "Grid Energy Out sensor"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Unable to connect to kwcost.com API."
+    },
+    "abort": {
+      "already_configured": "This rate schedule is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "base_rate": {
+        "name": "Base Rate"
+      },
+      "effective_rate": {
+        "name": "Effective Rate"
+      },
+      "schedule_name": {
+        "name": "Rate Schedule"
+      },
+      "facility_charge": {
+        "name": "Basic Facilities Charge"
+      },
+      "tou_period": {
+        "name": "TOU Period"
+      },
+      "tou_season": {
+        "name": "TOU Season"
+      },
+      "grid_cost": {
+        "name": "Grid Energy Cost"
+      },
+      "grid_export_cost": {
+        "name": "Grid Export Cost"
+      },
+      "grid_export_credit": {
+        "name": "Grid Export Credit (TOU)"
+      }
+    }
+  }
+}

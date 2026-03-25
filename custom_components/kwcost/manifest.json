@@ -1,0 +1,12 @@
+{
+  "domain": "kwcost",
+  "name": "Kilowatt Cost",
+  "codeowners": ["@RAR"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://kwcost.com/docs",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/RAR/ha-kwcost/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
