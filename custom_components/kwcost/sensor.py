@@ -416,9 +416,17 @@ def _get_export_credit_rate(
         if code not in optional_rider_codes:
             continue
         rider = optional.get(code, {})
-        for charge in rider.get("charges", []):
-            if charge.get("type") == "credit" and charge.get("unit") == "per_kwh":
-                return charge["value"]
+        charges = rider.get("charges", {})
+        if isinstance(charges, dict):
+            # Flat dict: {"solar_energy_credit_per_kwh": -0.021543, ...}
+            for key, value in charges.items():
+                if "credit" in key and isinstance(value, (int, float)) and value < 0:
+                    return abs(value)
+        elif isinstance(charges, list):
+            # List of charge objects: [{"type": "credit", "unit": "per_kwh", "value": ...}]
+            for charge in charges:
+                if isinstance(charge, dict) and charge.get("type") == "credit" and charge.get("unit") == "per_kwh":
+                    return charge["value"]
     return None
 
 
