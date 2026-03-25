@@ -24,6 +24,7 @@
         "title": "Energy Sensors (Optional)",
         "description": "Select energy sensors to track cost. Grid Energy In calculates your import cost. Grid Energy Out calculates export credit (TOU-aware if a TOU schedule is configured).",
         "data": {
+          "include_riders": "Include mandatory riders in cost calculation",
           "grid_energy_in_entity": "Grid Energy In sensor",
           "grid_energy_out_entity": "Grid Energy Out sensor"
         }

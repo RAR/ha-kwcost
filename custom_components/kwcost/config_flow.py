@@ -26,6 +26,7 @@ from .const import (
     CONF_MUNICIPALITY,
     CONF_GRID_ENERGY_IN,
     CONF_GRID_ENERGY_OUT,
+    CONF_INCLUDE_RIDERS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PASSWORD: self._password,
                 **self._schedule_data,
             }
+            data[CONF_INCLUDE_RIDERS] = user_input.get(CONF_INCLUDE_RIDERS, True)
             if user_input.get(CONF_GRID_ENERGY_IN):
                 data[CONF_GRID_ENERGY_IN] = user_input[CONF_GRID_ENERGY_IN]
             if user_input.get(CONF_GRID_ENERGY_OUT):
@@ -188,6 +190,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="energy",
             data_schema=vol.Schema(
                 {
+                    vol.Optional(CONF_INCLUDE_RIDERS, default=True): bool,
                     vol.Optional(CONF_GRID_ENERGY_IN): energy_selector,
                     vol.Optional(CONF_GRID_ENERGY_OUT): energy_selector,
                 }

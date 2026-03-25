@@ -12,6 +12,7 @@ CONF_STATE = "state"
 CONF_MUNICIPALITY = "municipality"
 CONF_GRID_ENERGY_IN = "grid_energy_in_entity"
 CONF_GRID_ENERGY_OUT = "grid_energy_out_entity"
+CONF_INCLUDE_RIDERS = "include_riders"
 
 API_BASE_URL = "https://api.kwcost.com"
 

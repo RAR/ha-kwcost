@@ -26,6 +26,7 @@ from .const import (
     CONF_TOU_SCHEDULE,
     CONF_GRID_ENERGY_IN,
     CONF_GRID_ENERGY_OUT,
+    CONF_INCLUDE_RIDERS,
 )
 from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator
 
@@ -57,8 +58,8 @@ async def async_setup_entry(
     tou_coordinator: KwcostTouCoordinator | None = coordinators.get("tou")
 
     entities: list[SensorEntity] = [
-        KwcostBaseRateSensor(rate_coordinator, entry),
-        KwcostEffectiveRateSensor(rate_coordinator, entry),
+        KwcostBaseRateSensor(rate_coordinator, entry, tou_coordinator),
+        KwcostEffectiveRateSensor(rate_coordinator, entry, tou_coordinator),
         KwcostScheduleNameSensor(rate_coordinator, entry),
         KwcostBaseFacilityChargeSensor(rate_coordinator, entry),
     ]
@@ -73,11 +74,13 @@ async def async_setup_entry(
 
     # Cost tracking sensors based on user-selected energy sensors
     grid_in_entity = entry.data.get(CONF_GRID_ENERGY_IN)
+    include_riders = entry.data.get(CONF_INCLUDE_RIDERS, True)
     if grid_in_entity:
         entities.append(
             KwcostGridCostSensor(
                 hass, rate_coordinator, entry, grid_in_entity,
                 tou_coordinator=tou_coordinator,
+                include_riders=include_riders,
             )
         )
 
@@ -85,14 +88,16 @@ async def async_setup_entry(
     if grid_out_entity and tou_coordinator is not None:
         entities.append(
             KwcostGridExportCreditSensor(
-                hass, rate_coordinator, tou_coordinator, entry, grid_out_entity
+                hass, rate_coordinator, tou_coordinator, entry, grid_out_entity,
+                include_riders=include_riders,
             )
         )
     elif grid_out_entity:
         # No TOU — use flat rate for export credit too
         entities.append(
             KwcostGridCostSensor(
-                hass, rate_coordinator, entry, grid_out_entity, is_export=True
+                hass, rate_coordinator, entry, grid_out_entity, is_export=True,
+                include_riders=include_riders,
             )
         )
 
@@ -108,9 +113,13 @@ class KwcostBaseRateSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntit
     _attr_icon = "mdi:flash"
 
     def __init__(
-        self, coordinator: KwcostRateCoordinator, entry: ConfigEntry
+        self,
+        coordinator: KwcostRateCoordinator,
+        entry: ConfigEntry,
+        tou_coordinator: KwcostTouCoordinator | None = None,
     ) -> None:
         super().__init__(coordinator)
+        self._tou_coordinator = tou_coordinator
         self._attr_unique_id = f"{entry.entry_id}_base_rate"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "base_rate"
@@ -123,18 +132,37 @@ class KwcostBaseRateSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntit
             self.coordinator.data.get("rate", {})
             .get("effective_rate_summary", {})
         )
-        return summary.get("base_rate_per_kwh")
+        # Flat schedule: top-level base_rate_per_kwh
+        if "base_rate_per_kwh" in summary:
+            return summary["base_rate_per_kwh"]
+        # TOU schedule: per-period dict — use current TOU period
+        period = None
+        if self._tou_coordinator and self._tou_coordinator.data:
+            period = self._tou_coordinator.data.get("period")
+        if period and period in summary:
+            return summary[period].get("base_rate_per_kwh")
+        # Fallback: return the first period's rate
+        for key, val in summary.items():
+            if isinstance(val, dict) and "base_rate_per_kwh" in val:
+                return val["base_rate_per_kwh"]
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         if not self.coordinator.data:
             return {}
         details = self.coordinator.data.get("rate", {}).get("details", {})
-        charges = details.get("energy_charges_per_kwh", [])
-        return {
-            "energy_tiers": charges,
+        charges = details.get("energy_charges_per_kwh", {})
+        attrs: dict[str, Any] = {
             "effective_date": details.get("effective_date"),
         }
+        if isinstance(charges, list):
+            attrs["energy_tiers"] = charges
+        elif isinstance(charges, dict):
+            attrs["energy_rates_by_period"] = charges
+        if self._tou_coordinator and self._tou_coordinator.data:
+            attrs["current_tou_period"] = self._tou_coordinator.data.get("period")
+        return attrs
 
 
 class KwcostEffectiveRateSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntity):
@@ -146,9 +174,13 @@ class KwcostEffectiveRateSensor(CoordinatorEntity[KwcostRateCoordinator], Sensor
     _attr_icon = "mdi:cash"
 
     def __init__(
-        self, coordinator: KwcostRateCoordinator, entry: ConfigEntry
+        self,
+        coordinator: KwcostRateCoordinator,
+        entry: ConfigEntry,
+        tou_coordinator: KwcostTouCoordinator | None = None,
     ) -> None:
         super().__init__(coordinator)
+        self._tou_coordinator = tou_coordinator
         self._attr_unique_id = f"{entry.entry_id}_effective_rate"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "effective_rate"
@@ -157,11 +189,23 @@ class KwcostEffectiveRateSensor(CoordinatorEntity[KwcostRateCoordinator], Sensor
     def native_value(self) -> float | None:
         if not self.coordinator.data:
             return None
-        return (
+        summary = (
             self.coordinator.data.get("rate", {})
             .get("effective_rate_summary", {})
-            .get("effective_cents_per_kwh")
         )
+        # Flat schedule
+        if "effective_cents_per_kwh" in summary:
+            return summary["effective_cents_per_kwh"]
+        # TOU schedule: per-period dict
+        period = None
+        if self._tou_coordinator and self._tou_coordinator.data:
+            period = self._tou_coordinator.data.get("period")
+        if period and period in summary:
+            return summary[period].get("effective_cents_per_kwh")
+        for key, val in summary.items():
+            if isinstance(val, dict) and "effective_cents_per_kwh" in val:
+                return val["effective_cents_per_kwh"]
+        return None
 
 
 class KwcostScheduleNameSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntity):
@@ -303,6 +347,22 @@ def _get_tou_rate(
     return None
 
 
+def _get_rider_adder(coordinator: KwcostRateCoordinator) -> float:
+    """Sum all mandatory rider rates and return the total adder in $/kWh."""
+    if not coordinator.data:
+        return 0.0
+    riders_data = coordinator.data.get("riders", {})
+    mandatory = riders_data.get("mandatory_riders", {})
+    total_cents = 0.0
+    for group_data in mandatory.values():
+        riders = group_data.get("riders", {})
+        for rider in riders.values():
+            rate = rider.get("rate_cents_per_kwh", 0.0)
+            if isinstance(rate, (int, float)):
+                total_cents += rate
+    return total_cents / 100.0  # convert ¢/kWh → $/kWh
+
+
 class KwcostGridCostSensor(RestoreEntity, SensorEntity):
     """Tracks cumulative cost of grid energy imported (or exported at flat rate).
 
@@ -325,12 +385,14 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
         source_entity: str,
         is_export: bool = False,
         tou_coordinator: KwcostTouCoordinator | None = None,
+        include_riders: bool = True,
     ) -> None:
         self.hass = hass
         self._rate_coordinator = rate_coordinator
         self._tou_coordinator = tou_coordinator
         self._source_entity = source_entity
         self._is_export = is_export
+        self._include_riders = include_riders
         self._accumulated_cost: float = 0.0
         self._last_energy_value: float | None = None
         self._unsub: Any = None
@@ -377,6 +439,9 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
         if rate is None:
             return
 
+        if self._include_riders:
+            rate += _get_rider_adder(self._rate_coordinator)
+
         if self._last_energy_value is not None:
             delta = new_energy - self._last_energy_value
             if delta > 0:
@@ -402,9 +467,14 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
                 rate = tou_rate
             if self._tou_coordinator.data:
                 tou_period = self._tou_coordinator.data.get("period")
+        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+        all_in_rate = (rate + rider_adder) if rate is not None else None
         attrs: dict[str, Any] = {
             "source_entity": self._source_entity,
-            "current_rate_per_kwh": rate,
+            "base_rate_per_kwh": rate,
+            "rider_adder_per_kwh": round(rider_adder, 6),
+            "current_rate_per_kwh": round(all_in_rate, 6) if all_in_rate is not None else None,
+            "include_riders": self._include_riders,
             "last_energy_value": self._last_energy_value,
         }
         if tou_period is not None:
@@ -433,11 +503,13 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         tou_coordinator: KwcostTouCoordinator,
         entry: ConfigEntry,
         source_entity: str,
+        include_riders: bool = True,
     ) -> None:
         self.hass = hass
         self._rate_coordinator = rate_coordinator
         self._tou_coordinator = tou_coordinator
         self._source_entity = source_entity
+        self._include_riders = include_riders
         self._accumulated_credit: float = 0.0
         self._last_energy_value: float | None = None
         self._unsub: Any = None
@@ -482,6 +554,9 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         if rate is None:
             return
 
+        if self._include_riders:
+            rate += _get_rider_adder(self._rate_coordinator)
+
         if self._last_energy_value is not None:
             delta = new_energy - self._last_energy_value
             if delta > 0:
@@ -502,12 +577,17 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         tou_period = None
         if self._tou_coordinator.data:
             tou_period = self._tou_coordinator.data.get("period")
-        current_rate = _get_tou_rate(
+        base_rate = _get_tou_rate(
             self._rate_coordinator, self._tou_coordinator
         )
+        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+        all_in_rate = (base_rate + rider_adder) if base_rate is not None else None
         return {
             "source_entity": self._source_entity,
-            "current_rate_per_kwh": current_rate,
+            "base_rate_per_kwh": base_rate,
+            "rider_adder_per_kwh": round(rider_adder, 6),
+            "current_rate_per_kwh": round(all_in_rate, 6) if all_in_rate is not None else None,
+            "include_riders": self._include_riders,
             "current_tou_period": tou_period,
             "last_energy_value": self._last_energy_value,
         }
