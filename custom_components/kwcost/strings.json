@@ -27,7 +27,8 @@
           "optional_riders": "Optional riders (solar, net metering, etc.)",
           "nameplate_capacity_kw": "Solar system size (kW)",
           "grid_energy_in_entity": "Grid Energy In sensor",
-          "grid_energy_out_entity": "Grid Energy Out sensor"
+          "grid_energy_out_entity": "Grid Energy Out sensor",
+          "billing_day": "Billing cycle start day (1-28)"
         }
       }
     },
@@ -49,7 +50,8 @@
           "optional_riders": "Optional riders (solar, net metering, etc.)",
           "nameplate_capacity_kw": "Solar system size (kW)",
           "grid_energy_in_entity": "Grid Energy In sensor",
-          "grid_energy_out_entity": "Grid Energy Out sensor"
+          "grid_energy_out_entity": "Grid Energy Out sensor",
+          "billing_day": "Billing cycle start day (1-28)"
         }
       }
     }
@@ -88,6 +90,9 @@
       },
       "tariff_forecast": {
         "name": "Tariff Forecast"
+      },
+      "monthly_bill": {
+        "name": "Monthly Bill Estimate"
       }
     }
   }

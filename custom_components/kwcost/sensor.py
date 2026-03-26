@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -29,6 +30,7 @@ from .const import (
     CONF_INCLUDE_RIDERS,
     CONF_OPTIONAL_RIDERS,
     CONF_NAMEPLATE_KW,
+    CONF_BILLING_DAY,
 )
 from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator, KwcostTariffCoordinator
 
@@ -83,14 +85,14 @@ async def async_setup_entry(
     include_riders = entry.data.get(CONF_INCLUDE_RIDERS, True)
     optional_riders = entry.data.get(CONF_OPTIONAL_RIDERS, [])
     nameplate_kw = entry.data.get(CONF_NAMEPLATE_KW, 0.0)
+    grid_cost_sensor: KwcostGridCostSensor | None = None
     if grid_in_entity:
-        entities.append(
-            KwcostGridCostSensor(
-                hass, rate_coordinator, entry, grid_in_entity,
-                tou_coordinator=tou_coordinator,
-                include_riders=include_riders,
-            )
+        grid_cost_sensor = KwcostGridCostSensor(
+            hass, rate_coordinator, entry, grid_in_entity,
+            tou_coordinator=tou_coordinator,
+            include_riders=include_riders,
         )
+        entities.append(grid_cost_sensor)
 
     grid_out_entity = entry.data.get(CONF_GRID_ENERGY_OUT)
     if grid_out_entity and tou_coordinator is not None:
@@ -115,6 +117,15 @@ async def async_setup_entry(
         entities.append(
             KwcostOptionalRiderSensor(
                 rate_coordinator, entry, optional_riders, nameplate_kw
+            )
+        )
+
+    # Monthly bill estimate sensor
+    billing_day = entry.data.get(CONF_BILLING_DAY, 1)
+    if grid_cost_sensor is not None:
+        entities.append(
+            KwcostMonthlyBillSensor(
+                hass, rate_coordinator, entry, grid_cost_sensor, billing_day
             )
         )
 
@@ -798,4 +809,92 @@ class KwcostTariffForecastSensor(
             "schedule": self.coordinator.tou_schedule,
             "jurisdiction": self.coordinator.jurisdiction,
             "rate_schedule": self.coordinator.rate_schedule,
+        }
+
+
+class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
+    """Estimated monthly bill — facilities charge + accumulated energy costs.
+
+    Resets on the configured billing day each month.
+    """
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "$"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:receipt-text"
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        rate_coordinator: KwcostRateCoordinator,
+        entry: ConfigEntry,
+        grid_cost_sensor: KwcostGridCostSensor,
+        billing_day: int = 1,
+    ) -> None:
+        self.hass = hass
+        self._rate_coordinator = rate_coordinator
+        self._grid_cost_sensor = grid_cost_sensor
+        self._billing_day = billing_day
+        self._last_reset_month: int | None = None
+        self._energy_cost_at_reset: float = 0.0
+
+        self._attr_unique_id = f"{entry.entry_id}_monthly_bill"
+        self._attr_device_info = _device_info(entry)
+        self._attr_translation_key = "monthly_bill"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore state."""
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            attrs = last_state.attributes
+            self._last_reset_month = attrs.get("last_reset_month")
+            self._energy_cost_at_reset = attrs.get("energy_cost_at_reset", 0.0)
+
+    def _check_reset(self) -> None:
+        """Reset if we've passed the billing day in a new month."""
+        now = datetime.now()
+        # Determine current billing month: if we're past billing day, it's this month.
+        # If before billing day, it's last month's cycle.
+        if now.day >= self._billing_day:
+            billing_month = now.month
+        else:
+            billing_month = now.month - 1 if now.month > 1 else 12
+
+        if self._last_reset_month != billing_month:
+            self._last_reset_month = billing_month
+            self._energy_cost_at_reset = self._grid_cost_sensor.native_value or 0.0
+
+    @property
+    def native_value(self) -> float | None:
+        self._check_reset()
+        facility = (
+            self._rate_coordinator.data.get("rate", {})
+            .get("details", {})
+            .get("basic_facilities_charge_dollars", 0.0)
+        ) if self._rate_coordinator.data else 0.0
+
+        current_energy_cost = self._grid_cost_sensor.native_value or 0.0
+        energy_since_reset = current_energy_cost - self._energy_cost_at_reset
+
+        return round(facility + max(energy_since_reset, 0.0), 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        facility = (
+            self._rate_coordinator.data.get("rate", {})
+            .get("details", {})
+            .get("basic_facilities_charge_dollars", 0.0)
+        ) if self._rate_coordinator.data else 0.0
+
+        current_energy_cost = self._grid_cost_sensor.native_value or 0.0
+        energy_since_reset = max(current_energy_cost - self._energy_cost_at_reset, 0.0)
+
+        return {
+            "facilities_charge": facility,
+            "energy_cost": round(energy_since_reset, 2),
+            "billing_day": self._billing_day,
+            "last_reset_month": self._last_reset_month,
+            "energy_cost_at_reset": self._energy_cost_at_reset,
         }

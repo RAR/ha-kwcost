@@ -35,6 +35,7 @@ from .const import (
     CONF_INCLUDE_RIDERS,
     CONF_OPTIONAL_RIDERS,
     CONF_NAMEPLATE_KW,
+    CONF_BILLING_DAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -201,6 +202,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 data[CONF_GRID_ENERGY_IN] = user_input[CONF_GRID_ENERGY_IN]
             if user_input.get(CONF_GRID_ENERGY_OUT):
                 data[CONF_GRID_ENERGY_OUT] = user_input[CONF_GRID_ENERGY_OUT]
+            data[CONF_BILLING_DAY] = user_input.get(CONF_BILLING_DAY, 1)
             return self.async_create_entry(
                 title=f"{self._schedule_data[CONF_JURISDICTION]} {self._schedule_data[CONF_SCHEDULE]}",
                 data=data,
@@ -239,6 +241,9 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema_fields[vol.Optional(CONF_GRID_ENERGY_IN)] = energy_selector
         schema_fields[vol.Optional(CONF_GRID_ENERGY_OUT)] = energy_selector
+        schema_fields[vol.Optional(CONF_BILLING_DAY, default=1)] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=28)
+        )
 
         return self.async_show_form(
             step_id="energy",
@@ -270,6 +275,7 @@ class KwcostOptionsFlow(OptionsFlow):
             new_data[CONF_NAMEPLATE_KW] = nameplate if nameplate else 0.0
             new_data[CONF_GRID_ENERGY_IN] = user_input.get(CONF_GRID_ENERGY_IN, "")
             new_data[CONF_GRID_ENERGY_OUT] = user_input.get(CONF_GRID_ENERGY_OUT, "")
+            new_data[CONF_BILLING_DAY] = user_input.get(CONF_BILLING_DAY, 1)
 
             self.hass.config_entries.async_update_entry(
                 self._config_entry, data=new_data
@@ -341,6 +347,12 @@ class KwcostOptionsFlow(OptionsFlow):
                 default=current.get(CONF_GRID_ENERGY_OUT, ""),
             )
         ] = energy_selector
+        schema_fields[
+            vol.Optional(
+                CONF_BILLING_DAY,
+                default=current.get(CONF_BILLING_DAY, 1),
+            )
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=28))
 
         return self.async_show_form(
             step_id="init",
