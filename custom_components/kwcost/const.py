@@ -2,8 +2,6 @@
 
 DOMAIN = "kwcost"
 
-CONF_EMAIL = "email"
-CONF_PASSWORD = "password"
 CONF_API_KEY = "api_key"
 CONF_JURISDICTION = "jurisdiction"
 CONF_CATEGORY = "category"

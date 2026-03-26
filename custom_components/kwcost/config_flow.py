@@ -11,7 +11,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import KwcostApiClient, KwcostAuthError, KwcostApiError
+from .api import KwcostApiClient, KwcostApiError
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -23,8 +23,7 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     DOMAIN,
-    CONF_EMAIL,
-    CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_JURISDICTION,
     CONF_CATEGORY,
     CONF_SCHEDULE,
@@ -44,7 +43,7 @@ _LOGGER = logging.getLogger(__name__)
 class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kilowatt Cost."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     def async_get_options_flow(config_entry):
@@ -54,8 +53,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._client: KwcostApiClient | None = None
-        self._email: str = ""
-        self._password: str = ""
+        self._api_key: str = ""
         self._jurisdictions: dict[str, Any] = {}
         self._tou_schedules: dict[str, Any] = {}
         self._schedule_data: dict[str, Any] = {}
@@ -64,26 +62,20 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: Collect API credentials."""
+        """Step 1: Collect API key."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._email = user_input[CONF_EMAIL]
-            self._password = user_input[CONF_PASSWORD]
+            self._api_key = user_input[CONF_API_KEY]
             session = async_get_clientsession(self.hass)
-            self._client = KwcostApiClient(
-                session, self._email, self._password
-            )
+            self._client = KwcostApiClient(session, self._api_key)
 
             try:
                 await self._client.async_validate()
-            except KwcostAuthError:
+            except KwcostApiError as err:
+                _LOGGER.error("API key validation failed: %s", err)
                 errors["base"] = "invalid_auth"
-            except (KwcostApiError, aiohttp.ClientError) as err:
-                _LOGGER.error("Login failed: %s", err)
-                errors["base"] = "cannot_connect"
             else:
-                # Fetch jurisdictions and TOU schedules for step 2
                 try:
                     rates_data = await self._client.async_get_jurisdictions()
                     self._jurisdictions = rates_data.get("jurisdictions", {})
@@ -98,8 +90,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_EMAIL): str,
-                    vol.Required(CONF_PASSWORD): str,
+                    vol.Required(CONF_API_KEY): str,
                 }
             ),
             errors=errors,
@@ -123,7 +114,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             state = states[0] if states else ""
 
             await self.async_set_unique_id(
-                f"{self._email}_{jurisdiction}_{schedule}"
+                f"{self._api_key[:8]}_{jurisdiction}_{schedule}"
             )
             self._abort_if_unique_id_configured()
 
@@ -196,8 +187,7 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
         """Step 3: Optionally select energy sensors, optional riders, and system info."""
         if user_input is not None:
             data = {
-                CONF_EMAIL: self._email,
-                CONF_PASSWORD: self._password,
+                CONF_API_KEY: self._api_key,
                 **self._schedule_data,
             }
             data[CONF_INCLUDE_RIDERS] = user_input.get(CONF_INCLUDE_RIDERS, True)
@@ -289,11 +279,7 @@ class KwcostOptionsFlow(OptionsFlow):
 
         # Fetch optional riders from API for the dropdown
         session = async_get_clientsession(self.hass)
-        client = KwcostApiClient(
-            session,
-            self._config_entry.data[CONF_EMAIL],
-            self._config_entry.data[CONF_PASSWORD],
-        )
+        client = KwcostApiClient(session, self._config_entry.data[CONF_API_KEY])
         try:
             riders_resp = await client.async_get_riders(
                 self._config_entry.data[CONF_JURISDICTION],

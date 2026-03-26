@@ -141,21 +141,6 @@ class KwcostBaseRateSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntit
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "base_rate"
 
-    async def async_added_to_hass(self) -> None:
-        """Register listener on TOU coordinator so rate updates on period change."""
-        await super().async_added_to_hass()
-        if self._tou_coordinator is not None:
-            self.async_on_remove(
-                self._tou_coordinator.async_add_listener(
-                    self._handle_tou_update
-                )
-            )
-
-    @callback
-    def _handle_tou_update(self) -> None:
-        """Write state when the TOU period changes."""
-        self.async_write_ha_state()
-
     @property
     def native_value(self) -> float | None:
         if not self.coordinator.data:
@@ -216,21 +201,6 @@ class KwcostEffectiveRateSensor(CoordinatorEntity[KwcostRateCoordinator], Sensor
         self._attr_unique_id = f"{entry.entry_id}_effective_rate"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "effective_rate"
-
-    async def async_added_to_hass(self) -> None:
-        """Register listener on TOU coordinator so rate updates on period change."""
-        await super().async_added_to_hass()
-        if self._tou_coordinator is not None:
-            self.async_on_remove(
-                self._tou_coordinator.async_add_listener(
-                    self._handle_tou_update
-                )
-            )
-
-    @callback
-    def _handle_tou_update(self) -> None:
-        """Write state when the TOU period changes."""
-        self.async_write_ha_state()
 
     @property
     def native_value(self) -> float | None:
@@ -743,24 +713,18 @@ class KwcostOptionalRiderSensor(
         total = 0.0
         for code in self._rider_codes:
             rider = optional.get(code, {})
-            charges = rider.get("charges", [])
-            if isinstance(charges, list):
-                for charge in charges:
-                    if not isinstance(charge, dict):
-                        continue
-                    unit = charge.get("unit", "fixed")
-                    value = charge.get("value", 0)
-                    charge_type = charge.get("type", "charge")
-                    if charge_type == "credit":
-                        continue  # Credits are handled by export sensor
-                    if unit == "fixed":
+            # Fixed charges are a flat dict: {"daily_service_charge_dollars": 0.48, ...}
+            fixed = rider.get("fixed_charges", {})
+            if isinstance(fixed, dict):
+                for _key, value in fixed.items():
+                    if isinstance(value, (int, float)):
                         total += value
-                    elif unit == "per_kw" and self._nameplate_kw > 0:
-                        kw = self._nameplate_kw
-                        # Handle "above 15 kW" type charges
-                        if "above 15" in charge.get("description", "").lower():
-                            kw = max(0, kw - 15)
-                        total += value * kw
+            # Also check charges dict for per-kW items
+            charges = rider.get("charges", {})
+            if isinstance(charges, dict):
+                for key, value in charges.items():
+                    if "per_kw" in key and isinstance(value, (int, float)) and self._nameplate_kw > 0:
+                        total += value * self._nameplate_kw
         return round(total, 2)
 
     @property
@@ -776,12 +740,19 @@ class KwcostOptionalRiderSensor(
             rider = optional.get(code, {})
             if rider:
                 attrs[f"{code}_name"] = rider.get("name", code)
-                charges = rider.get("charges", [])
-                if isinstance(charges, list):
-                    for i, charge in enumerate(charges):
-                        if isinstance(charge, dict):
-                            desc = charge.get("description", f"charge_{i}")
-                            attrs[f"{code}_{desc}"] = charge.get("value")
+                charges = rider.get("charges", {})
+                if isinstance(charges, dict):
+                    for key, value in charges.items():
+                        attr_key = f"{code}_{key}"
+                        attrs[attr_key] = value
+                fixed = rider.get("fixed_charges", {})
+                if isinstance(fixed, dict):
+                    for key, value in fixed.items():
+                        attr_key = f"{code}_{key}"
+                        attrs[attr_key] = value
+                min_bill = rider.get("minimum_bill_dollars")
+                if min_bill:
+                    attrs[f"{code}_minimum_bill"] = min_bill
         return attrs
 
 

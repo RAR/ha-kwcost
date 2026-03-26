@@ -12,8 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import KwcostApiClient
 from .const import (
     DOMAIN,
-    CONF_EMAIL,
-    CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_JURISDICTION,
     CONF_CATEGORY,
     CONF_SCHEDULE,
@@ -29,11 +28,7 @@ PLATFORMS = [Platform.SENSOR]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Kilowatt Cost from a config entry."""
     session = async_get_clientsession(hass)
-    client = KwcostApiClient(
-        session,
-        entry.data[CONF_EMAIL],
-        entry.data[CONF_PASSWORD],
-    )
+    client = KwcostApiClient(session, entry.data[CONF_API_KEY])
 
     rate_coordinator = KwcostRateCoordinator(
         hass,
