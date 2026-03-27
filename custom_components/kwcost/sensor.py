@@ -796,7 +796,7 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         )
 
         remaining_offset = max(self._period_imports - self._period_exports, 0)
-        netting_status = "offset" if remaining_offset > 0 else "excess"
+        netting_status = "offset" if self._period_exports <= self._period_imports else "excess"
 
         return {
             "source_entity": self._source_entity,
