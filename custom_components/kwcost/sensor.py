@@ -95,15 +95,15 @@ async def async_setup_entry(
         entities.append(grid_cost_sensor)
 
     grid_out_entity = entry.data.get(CONF_GRID_ENERGY_OUT)
+    export_credit_sensor: KwcostGridExportCreditSensor | None = None
     if grid_out_entity and tou_coordinator is not None:
-        entities.append(
-            KwcostGridExportCreditSensor(
-                hass, rate_coordinator, tou_coordinator, entry, grid_out_entity,
-                grid_in_entity=grid_in_entity,
-                include_riders=include_riders,
-                optional_riders=optional_riders,
-            )
+        export_credit_sensor = KwcostGridExportCreditSensor(
+            hass, rate_coordinator, tou_coordinator, entry, grid_out_entity,
+            grid_in_entity=grid_in_entity,
+            include_riders=include_riders,
+            optional_riders=optional_riders,
         )
+        entities.append(export_credit_sensor)
     elif grid_out_entity:
         # No TOU — use flat rate for export credit too
         entities.append(
@@ -126,7 +126,10 @@ async def async_setup_entry(
     if grid_cost_sensor is not None:
         entities.append(
             KwcostMonthlyBillSensor(
-                hass, rate_coordinator, entry, grid_cost_sensor, billing_day
+                hass, rate_coordinator, entry, grid_cost_sensor, billing_day,
+                export_credit_sensor=export_credit_sensor,
+                nameplate_kw=nameplate_kw,
+                optional_riders=optional_riders,
             )
         )
 
@@ -1217,8 +1220,10 @@ class KwcostTariffForecastSensor(
 
 
 class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
-    """Estimated monthly bill — facilities charge + accumulated energy costs.
+    """Estimated monthly bill — all charges minus export credits.
 
+    Includes: facilities charge, energy costs, CEPS fixed charge,
+    non-bypassable charge (per kW), and subtracts export credits.
     Resets on the configured billing day each month.
     """
 
@@ -1236,13 +1241,20 @@ class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
         entry: ConfigEntry,
         grid_cost_sensor: KwcostGridCostSensor,
         billing_day: int = 1,
+        export_credit_sensor: KwcostGridExportCreditSensor | None = None,
+        nameplate_kw: float = 0.0,
+        optional_riders: list[str] | None = None,
     ) -> None:
         self.hass = hass
         self._rate_coordinator = rate_coordinator
         self._grid_cost_sensor = grid_cost_sensor
+        self._export_credit_sensor = export_credit_sensor
+        self._nameplate_kw = nameplate_kw
+        self._optional_riders = optional_riders or []
         self._billing_day = billing_day
         self._last_reset_month: int | None = None
         self._energy_cost_at_reset: float = 0.0
+        self._export_credit_at_reset: float = 0.0
 
         self._attr_unique_id = f"{entry.entry_id}_monthly_bill"
         self._attr_device_info = _device_info(entry)
@@ -1255,12 +1267,11 @@ class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
             attrs = last_state.attributes
             self._last_reset_month = attrs.get("last_reset_month")
             self._energy_cost_at_reset = attrs.get("energy_cost_at_reset", 0.0)
+            self._export_credit_at_reset = attrs.get("export_credit_at_reset", 0.0)
 
     def _check_reset(self) -> None:
         """Reset if we've passed the billing day in a new month."""
         now = datetime.now()
-        # Determine current billing month: if we're past billing day, it's this month.
-        # If before billing day, it's last month's cycle.
         if now.day >= self._billing_day:
             billing_month = now.month
         else:
@@ -1269,6 +1280,43 @@ class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
         if self._last_reset_month != billing_month:
             self._last_reset_month = billing_month
             self._energy_cost_at_reset = self._grid_cost_sensor.native_value or 0.0
+            if self._export_credit_sensor:
+                self._export_credit_at_reset = self._export_credit_sensor.native_value or 0.0
+
+    def _get_fixed_monthly_charges(self) -> tuple[float, dict[str, float]]:
+        """Get all fixed monthly charges from mandatory and optional riders.
+
+        Returns (total, breakdown_dict).
+        """
+        breakdown: dict[str, float] = {}
+        if not self._rate_coordinator.data:
+            return 0.0, breakdown
+
+        # Mandatory rider fixed charges (e.g., CEPS $1.37/mo)
+        riders_data = self._rate_coordinator.data.get("riders", {})
+        mandatory = riders_data.get("mandatory_riders", {})
+        for group_data in mandatory.values():
+            riders = group_data.get("riders", {})
+            for code, rider in riders.items():
+                fixed = rider.get("fixed_monthly_charge", 0.0)
+                if isinstance(fixed, (int, float)) and fixed > 0:
+                    breakdown[f"{code}_fixed"] = fixed
+
+        # Non-bypassable charge from optional riders (per kW × nameplate)
+        if self._nameplate_kw > 0:
+            optional = riders_data.get("optional_riders", {})
+            for code in self._optional_riders:
+                rider = optional.get(code, {})
+                charges = rider.get("charges", [])
+                if isinstance(charges, list):
+                    for charge in charges:
+                        if charge.get("unit") == "per_kw" and charge.get("type") == "charge":
+                            amount = charge["value"] * self._nameplate_kw
+                            desc = charge.get("description", f"{code}_per_kw")
+                            breakdown[f"{code}_{desc}"] = round(amount, 2)
+
+        total = sum(breakdown.values())
+        return round(total, 2), breakdown
 
     @property
     def native_value(self) -> float | None:
@@ -1280,9 +1328,17 @@ class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
         ) if self._rate_coordinator.data else 0.0
 
         current_energy_cost = self._grid_cost_sensor.native_value or 0.0
-        energy_since_reset = current_energy_cost - self._energy_cost_at_reset
+        energy_since_reset = max(current_energy_cost - self._energy_cost_at_reset, 0.0)
 
-        return round(facility + max(energy_since_reset, 0.0), 2)
+        export_credit = 0.0
+        if self._export_credit_sensor:
+            current_credit = self._export_credit_sensor.native_value or 0.0
+            export_credit = max(current_credit - self._export_credit_at_reset, 0.0)
+
+        fixed_charges, _ = self._get_fixed_monthly_charges()
+
+        total = facility + energy_since_reset + fixed_charges - export_credit
+        return round(max(total, 0.0), 2)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -1295,10 +1351,22 @@ class KwcostMonthlyBillSensor(RestoreEntity, SensorEntity):
         current_energy_cost = self._grid_cost_sensor.native_value or 0.0
         energy_since_reset = max(current_energy_cost - self._energy_cost_at_reset, 0.0)
 
+        export_credit = 0.0
+        if self._export_credit_sensor:
+            current_credit = self._export_credit_sensor.native_value or 0.0
+            export_credit = max(current_credit - self._export_credit_at_reset, 0.0)
+
+        fixed_charges, fixed_breakdown = self._get_fixed_monthly_charges()
+
         return {
             "facilities_charge": facility,
             "energy_cost": round(energy_since_reset, 2),
+            "fixed_rider_charges": fixed_charges,
+            "fixed_rider_breakdown": fixed_breakdown,
+            "export_credit": round(export_credit, 2),
+            "nameplate_capacity_kw": self._nameplate_kw,
             "billing_day": self._billing_day,
             "last_reset_month": self._last_reset_month,
             "energy_cost_at_reset": self._energy_cost_at_reset,
+            "export_credit_at_reset": self._export_credit_at_reset,
         }
