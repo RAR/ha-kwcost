@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import KwcostApiClient
@@ -22,7 +23,9 @@ from .coordinator import KwcostRateCoordinator, KwcostTouCoordinator, KwcostTari
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
+
+SERVICE_RECALCULATE = "recalculate_costs"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -39,7 +42,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await rate_coordinator.async_config_entry_first_refresh()
 
-    coordinators: dict = {"rate": rate_coordinator}
+    coordinators: dict = {"rate": rate_coordinator, "client": client}
 
     tou_schedule = entry.data.get(CONF_TOU_SCHEDULE, "")
     if tou_schedule:
@@ -63,6 +66,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Register services (once per domain)
+    if not hass.services.has_service(DOMAIN, SERVICE_RECALCULATE):
+        async def handle_recalculate(call: ServiceCall) -> ServiceResponse:
+            """Recalculate cost sensors from HA history."""
+            from .sensor import KwcostGridCostSensor, KwcostGridExportCreditSensor
+
+            days = call.data.get("days", 30)
+            results = []
+            for eid, data in hass.data.get(DOMAIN, {}).items():
+                if not isinstance(data, dict) or "client" not in data:
+                    continue
+                api_client = data["client"]
+                tou_sched = None
+                # Find the TOU schedule from the config entry
+                for entry in hass.config_entries.async_entries(DOMAIN):
+                    if entry.entry_id == eid:
+                        tou_sched = entry.data.get(CONF_TOU_SCHEDULE, "")
+                        break
+
+                # Find all cost sensors for this entry
+                entity_reg = hass.helpers.entity_registry.async_get(hass)
+                for entity_entry in entity_reg.entities.get_entries_for_config_entry_id(eid):
+                    state = hass.states.get(entity_entry.entity_id)
+                    if state is None:
+                        continue
+                    # Get the actual sensor object
+                    entity_comp = hass.data.get("entity_components", {}).get("sensor")
+                    if entity_comp is None:
+                        continue
+                    entity = entity_comp.get_entity(entity_entry.entity_id)
+                    if isinstance(entity, (KwcostGridCostSensor, KwcostGridExportCreditSensor)):
+                        result = await entity.async_recalculate_from_history(
+                            api_client, tou_sched or None, days=days
+                        )
+                        results.append(result)
+
+            return {"results": results}
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RECALCULATE,
+            handle_recalculate,
+            schema=vol.Schema({
+                vol.Optional("days", default=30): vol.All(int, vol.Range(min=1, max=365)),
+            }),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+
     return True
 
 

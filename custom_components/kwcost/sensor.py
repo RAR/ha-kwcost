@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -524,6 +524,118 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
         if self._unsub:
             self._unsub()
 
+    async def async_recalculate_from_history(self, api_client, tou_schedule: str | None = None, days: int = 30) -> dict:
+        """Recalculate accumulated cost by replaying energy history with correct rates.
+
+        Queries HA's recorder for all state changes on the source energy entity,
+        resolves TOU periods for each timestamp via the API, and applies current rates.
+        Returns a summary dict.
+        """
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import state_changes_during_period
+
+        _LOGGER.info("Recalculating grid cost from history for %s (%d days)", self._source_entity, days)
+
+        # Get all history for the source energy entity
+        now = datetime.now()
+        start = now - timedelta(days=days)
+
+        history = await get_instance(self.hass).async_add_executor_job(
+            state_changes_during_period,
+            self.hass,
+            start,
+            now,
+            self._source_entity,
+        )
+
+        states = history.get(self._source_entity, [])
+        if not states:
+            _LOGGER.warning("No history found for %s", self._source_entity)
+            return {"error": "No history found", "entity": self._source_entity}
+
+        # Get current rates from coordinator
+        flat_rate = _get_flat_rate(self._rate_coordinator)
+        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+
+        # Build rate lookup by TOU period from coordinator data
+        period_rates = {}
+        if self._rate_coordinator.data:
+            summary = (
+                self._rate_coordinator.data.get("rate", {})
+                .get("effective_rate_summary", {})
+            )
+            if "base_rate_per_kwh" not in summary:
+                # TOU schedule — summary has per-period rates
+                for period_name, period_data in summary.items():
+                    if isinstance(period_data, dict) and "base_rate_per_kwh" in period_data:
+                        period_rates[period_name] = period_data["base_rate_per_kwh"]
+
+        # Cache TOU lookups by hour to avoid excessive API calls
+        tou_cache: dict[str, str] = {}  # "YYYY-MM-DD HH" -> period
+
+        accumulated = 0.0
+        last_value: float | None = None
+        processed = 0
+        skipped = 0
+
+        for state in states:
+            if state.state in (None, "unknown", "unavailable", ""):
+                skipped += 1
+                continue
+            try:
+                energy = float(state.state)
+            except (ValueError, TypeError):
+                skipped += 1
+                continue
+
+            if last_value is not None:
+                delta = energy - last_value
+                if delta > 0:
+                    # Determine rate for this timestamp
+                    rate = flat_rate
+                    if tou_schedule and period_rates and state.last_changed:
+                        hour_key = state.last_changed.strftime("%Y-%m-%d %H")
+                        if hour_key not in tou_cache:
+                            try:
+                                dt_str = state.last_changed.isoformat()
+                                result = await api_client.async_tou_lookup(
+                                    tou_schedule, dt_str
+                                )
+                                tou_cache[hour_key] = result.get("period", "off_peak")
+                            except Exception:
+                                tou_cache[hour_key] = "off_peak"
+                        period = tou_cache[hour_key]
+                        if period in period_rates:
+                            rate = period_rates[period]
+
+                    if rate is not None:
+                        all_in_rate = rate + rider_adder
+                        accumulated += delta * all_in_rate
+                        processed += 1
+                elif delta < 0:
+                    pass  # meter reset
+
+            last_value = energy
+
+        old_cost = self._accumulated_cost
+        self._accumulated_cost = accumulated
+        self._last_energy_value = last_value
+        self.async_write_ha_state()
+
+        summary = {
+            "entity": self.entity_id,
+            "source_entity": self._source_entity,
+            "history_states": len(states),
+            "processed_deltas": processed,
+            "skipped": skipped,
+            "old_cost": round(old_cost, 2),
+            "new_cost": round(accumulated, 2),
+            "difference": round(accumulated - old_cost, 2),
+            "tou_periods_resolved": len(tou_cache),
+        }
+        _LOGGER.info("Recalculation complete: %s", summary)
+        return summary
+
     @callback
     def _handle_energy_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle state change on the source energy sensor."""
@@ -683,6 +795,166 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
             self._unsub_import()
         if self._unsub_tou:
             self._unsub_tou()
+
+    async def async_recalculate_from_history(self, api_client, tou_schedule: str | None = None, days: int = 30) -> dict:
+        """Recalculate export credit by replaying import+export history with per-period netting.
+
+        Queries HA's recorder for both import and export energy entity histories,
+        merges them chronologically, and replays the netting logic with correct rates.
+        """
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import state_changes_during_period
+
+        _LOGGER.info("Recalculating export credit from history for %s (%d days)", self._source_entity, days)
+
+        now = datetime.now()
+        start = now - timedelta(days=days)
+
+        # Get export history
+        export_history = await get_instance(self.hass).async_add_executor_job(
+            state_changes_during_period, self.hass, start, now, self._source_entity,
+        )
+        export_states = export_history.get(self._source_entity, [])
+
+        # Get import history for netting
+        import_states = []
+        if self._grid_in_entity:
+            import_history = await get_instance(self.hass).async_add_executor_job(
+                state_changes_during_period, self.hass, start, now, self._grid_in_entity,
+            )
+            import_states = import_history.get(self._grid_in_entity, [])
+
+        if not export_states:
+            _LOGGER.warning("No export history found for %s", self._source_entity)
+            return {"error": "No export history found", "entity": self._source_entity}
+
+        # Get rates
+        retail_rates = {}
+        if self._rate_coordinator.data:
+            summary = (
+                self._rate_coordinator.data.get("rate", {})
+                .get("effective_rate_summary", {})
+            )
+            if "base_rate_per_kwh" in summary:
+                retail_rates["_flat"] = summary["base_rate_per_kwh"]
+            else:
+                for period_name, period_data in summary.items():
+                    if isinstance(period_data, dict) and "base_rate_per_kwh" in period_data:
+                        retail_rates[period_name] = period_data["base_rate_per_kwh"]
+
+        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+        neec_rate = _get_export_credit_rate(self._rate_coordinator, self._optional_riders)
+
+        # Merge import+export events chronologically
+        events = []
+        last_import = None
+        for s in import_states:
+            if s.state in (None, "unknown", "unavailable", ""):
+                continue
+            try:
+                val = float(s.state)
+            except (ValueError, TypeError):
+                continue
+            if last_import is not None:
+                delta = val - last_import
+                if delta > 0:
+                    events.append(("import", s.last_changed, delta))
+            last_import = val
+
+        last_export = None
+        for s in export_states:
+            if s.state in (None, "unknown", "unavailable", ""):
+                continue
+            try:
+                val = float(s.state)
+            except (ValueError, TypeError):
+                continue
+            if last_export is not None:
+                delta = val - last_export
+                if delta > 0:
+                    events.append(("export", s.last_changed, delta))
+            last_export = val
+
+        events.sort(key=lambda e: e[1])
+
+        # TOU cache
+        tou_cache: dict[str, str] = {}
+
+        async def get_period(dt: datetime) -> str:
+            if not tou_schedule:
+                return "_flat"
+            hour_key = dt.strftime("%Y-%m-%d %H")
+            if hour_key not in tou_cache:
+                try:
+                    result = await api_client.async_tou_lookup(tou_schedule, dt.isoformat())
+                    tou_cache[hour_key] = result.get("period", "off_peak")
+                except Exception:
+                    tou_cache[hour_key] = "off_peak"
+            return tou_cache[hour_key]
+
+        # Replay with per-period netting
+        accumulated_credit = 0.0
+        current_period = None
+        period_imports = 0.0
+        period_exports = 0.0
+        processed = 0
+
+        for event_type, dt, delta in events:
+            period = await get_period(dt)
+
+            # Period changed — reset netting
+            if period != current_period:
+                current_period = period
+                period_imports = 0.0
+                period_exports = 0.0
+
+            if event_type == "import":
+                period_imports += delta
+            elif event_type == "export":
+                period_exports += delta
+
+                # Get retail rate for this period
+                rate = retail_rates.get(period) or retail_rates.get("_flat")
+                if rate is not None:
+                    rate += rider_adder
+
+                remaining_offset = max(period_imports - (period_exports - delta), 0)
+
+                if remaining_offset >= delta:
+                    if rate is not None:
+                        accumulated_credit += delta * rate
+                elif remaining_offset > 0:
+                    if rate is not None:
+                        accumulated_credit += remaining_offset * rate
+                    excess = delta - remaining_offset
+                    accumulated_credit += excess * (neec_rate if neec_rate else 0.0)
+                else:
+                    accumulated_credit += delta * (neec_rate if neec_rate else 0.0)
+
+                processed += 1
+
+        old_credit = self._accumulated_credit
+        self._accumulated_credit = accumulated_credit
+        self._last_export_value = last_export
+        self._last_import_value = last_import
+        self._current_period = current_period
+        self._period_imports = period_imports
+        self._period_exports = period_exports
+        self.async_write_ha_state()
+
+        result = {
+            "entity": self.entity_id,
+            "export_entity": self._source_entity,
+            "import_entity": self._grid_in_entity,
+            "history_events": len(events),
+            "processed_exports": processed,
+            "old_credit": round(old_credit, 2),
+            "new_credit": round(accumulated_credit, 2),
+            "difference": round(accumulated_credit - old_credit, 2),
+            "tou_periods_resolved": len(tou_cache),
+        }
+        _LOGGER.info("Export credit recalculation complete: %s", result)
+        return result
 
     @callback
     def _handle_tou_update(self) -> None:

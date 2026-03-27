@@ -1,0 +1,15 @@
+recalculate_costs:
+  name: Recalculate Costs
+  description: Recalculate grid cost and export credit sensors by replaying energy history with current rates and TOU periods.
+  fields:
+    days:
+      name: Days
+      description: Number of days of history to replay (1-365).
+      required: false
+      default: 30
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days

@@ -119,6 +119,12 @@ class KwcostApiClient:
             },
         )
 
+    async def async_tou_lookup(self, schedule: str, dt: str) -> dict[str, Any]:
+        """GET /tou/lookup — resolve TOU period for a specific datetime."""
+        return await self._request(
+            "GET", "/tou/lookup", params={"schedule": schedule, "datetime": dt}
+        )
+
     async def async_validate(self) -> bool:
         """Validate API key by making a test request."""
         await self._request("GET", "/rates/")
