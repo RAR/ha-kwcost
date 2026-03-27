@@ -34,10 +34,43 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Kilowatt Cost buttons."""
-    # Only add the recalculate button if grid energy sensors are configured
+    entities: list[ButtonEntity] = []
+
+    # Always add refresh button
+    entities.append(KwcostRefreshRatesButton(hass, entry))
+
+    # Only add recalculate button if grid energy sensors are configured
     has_grid = entry.data.get(CONF_GRID_ENERGY_IN) or entry.data.get(CONF_GRID_ENERGY_OUT)
     if has_grid:
-        async_add_entities([KwcostRecalculateButton(hass, entry)])
+        entities.append(KwcostRecalculateButton(hass, entry))
+
+    async_add_entities(entities)
+
+
+class KwcostRefreshRatesButton(ButtonEntity):
+    """Button to force-refresh rate and rider data from the API."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:refresh"
+    _attr_translation_key = "refresh_rates"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_refresh_rates"
+        self._attr_device_info = _device_info(entry)
+        self._attr_name = "Refresh Rates"
+
+    async def async_press(self) -> None:
+        """Force refresh all coordinators from the API."""
+        _LOGGER.info("Refresh rates button pressed for %s", self._entry.entry_id)
+        coordinators = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+        for name in ("rate", "tou", "tariff"):
+            coordinator = coordinators.get(name)
+            if coordinator is not None:
+                await coordinator.async_request_refresh()
+                _LOGGER.info("Refreshed %s coordinator", name)
 
 
 class KwcostRecalculateButton(ButtonEntity):

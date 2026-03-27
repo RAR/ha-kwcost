@@ -421,7 +421,10 @@ def _get_tou_rate(
 
 
 def _get_rider_adder(coordinator: KwcostRateCoordinator) -> float:
-    """Sum all mandatory rider rates and return the total adder in $/kWh."""
+    """Sum all mandatory rider rates and return the total adder in $/kWh.
+
+    Credits (is_credit=True) are subtracted, charges are added.
+    """
     if not coordinator.data:
         return 0.0
     riders_data = coordinator.data.get("riders", {})
@@ -432,7 +435,10 @@ def _get_rider_adder(coordinator: KwcostRateCoordinator) -> float:
         for rider in riders.values():
             rate = rider.get("rate_cents_per_kwh", 0.0)
             if isinstance(rate, (int, float)):
-                total_cents += rate
+                if rider.get("is_credit"):
+                    total_cents -= rate
+                else:
+                    total_cents += rate
     return total_cents / 100.0  # convert ¢/kWh → $/kWh
 
 
