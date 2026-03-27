@@ -99,6 +99,7 @@ async def async_setup_entry(
         entities.append(
             KwcostGridExportCreditSensor(
                 hass, rate_coordinator, tou_coordinator, entry, grid_out_entity,
+                grid_in_entity=grid_in_entity,
                 include_riders=include_riders,
                 optional_riders=optional_riders,
             )
@@ -587,10 +588,12 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
 
 
 class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
-    """Tracks cumulative credit for grid energy exported, TOU-aware.
+    """Tracks cumulative credit for grid energy exported with per-TOU-period netting.
 
-    Uses the current TOU period rate when calculating the credit for each
-    energy delta, so on-peak exports get valued at the higher rate.
+    Within each TOU period, exports offset imports at the full retail rate (1:1).
+    Once exports exceed imports for the current period, additional exports are
+    credited at the Net Excess Energy Credit (NEEC) rate from the rider.
+    Counters reset when the TOU period changes.
     """
 
     _attr_has_entity_name = True
@@ -607,6 +610,7 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         tou_coordinator: KwcostTouCoordinator,
         entry: ConfigEntry,
         source_entity: str,
+        grid_in_entity: str | None = None,
         include_riders: bool = True,
         optional_riders: list[str] | None = None,
     ) -> None:
@@ -614,36 +618,113 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         self._rate_coordinator = rate_coordinator
         self._tou_coordinator = tou_coordinator
         self._source_entity = source_entity
+        self._grid_in_entity = grid_in_entity
         self._include_riders = include_riders
         self._optional_riders = optional_riders or []
         self._accumulated_credit: float = 0.0
-        self._last_energy_value: float | None = None
-        self._unsub: Any = None
+        self._last_export_value: float | None = None
+        self._last_import_value: float | None = None
+        self._unsub_export: Any = None
+        self._unsub_import: Any = None
+        self._unsub_tou: Any = None
+
+        # Per-period netting state
+        self._current_period: str | None = None
+        self._period_imports: float = 0.0
+        self._period_exports: float = 0.0
 
         self._attr_unique_id = f"{entry.entry_id}_grid_export_credit_tou"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "grid_export_credit"
 
     async def async_added_to_hass(self) -> None:
-        """Restore state and start tracking source sensor."""
+        """Restore state and start tracking energy sensors and TOU changes."""
         last_state = await self.async_get_last_state()
         if last_state and last_state.state not in (None, "unknown", "unavailable"):
             self._accumulated_credit = float(last_state.state)
             attrs = last_state.attributes
-            if attrs.get("last_energy_value") is not None:
-                self._last_energy_value = float(attrs["last_energy_value"])
+            if attrs.get("last_export_value") is not None:
+                self._last_export_value = float(attrs["last_export_value"])
+            # Legacy restore: check old attribute name
+            elif attrs.get("last_energy_value") is not None:
+                self._last_export_value = float(attrs["last_energy_value"])
+            if attrs.get("last_import_value") is not None:
+                self._last_import_value = float(attrs["last_import_value"])
+            if attrs.get("period_imports") is not None:
+                self._period_imports = float(attrs["period_imports"])
+            if attrs.get("period_exports") is not None:
+                self._period_exports = float(attrs["period_exports"])
+            self._current_period = attrs.get("current_tou_period")
 
-        self._unsub = async_track_state_change_event(
-            self.hass, [self._source_entity], self._handle_energy_change
+        # Track export energy sensor
+        self._unsub_export = async_track_state_change_event(
+            self.hass, [self._source_entity], self._handle_export_change
         )
 
+        # Track import energy sensor for per-period netting
+        if self._grid_in_entity:
+            self._unsub_import = async_track_state_change_event(
+                self.hass, [self._grid_in_entity], self._handle_import_change
+            )
+
+        # Track TOU period changes to reset netting counters
+        self._unsub_tou = self._tou_coordinator.async_add_listener(
+            self._handle_tou_update
+        )
+
+        # Initialize current period
+        if self._tou_coordinator.data and self._current_period is None:
+            self._current_period = self._tou_coordinator.data.get("period")
+
     async def async_will_remove_from_hass(self) -> None:
-        if self._unsub:
-            self._unsub()
+        if self._unsub_export:
+            self._unsub_export()
+        if self._unsub_import:
+            self._unsub_import()
+        if self._unsub_tou:
+            self._unsub_tou()
 
     @callback
-    def _handle_energy_change(self, event: Event[EventStateChangedData]) -> None:
-        """Handle state change on the source energy sensor."""
+    def _handle_tou_update(self) -> None:
+        """Reset period netting counters when TOU period changes."""
+        if not self._tou_coordinator.data:
+            return
+        new_period = self._tou_coordinator.data.get("period")
+        if new_period and new_period != self._current_period:
+            _LOGGER.debug(
+                "TOU period changed %s -> %s, resetting netting counters "
+                "(was: %.3f kWh imports, %.3f kWh exports)",
+                self._current_period, new_period,
+                self._period_imports, self._period_exports,
+            )
+            self._current_period = new_period
+            self._period_imports = 0.0
+            self._period_exports = 0.0
+            self.async_write_ha_state()
+
+    @callback
+    def _handle_import_change(self, event: Event[EventStateChangedData]) -> None:
+        """Track imports in the current TOU period for netting."""
+        new_state = event.data.get("new_state")
+        if new_state is None or new_state.state in ("unknown", "unavailable"):
+            return
+        try:
+            new_energy = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        if self._last_import_value is not None:
+            delta = new_energy - self._last_import_value
+            if delta > 0:
+                self._period_imports += delta
+            elif delta < 0:
+                # Meter reset
+                pass
+        self._last_import_value = new_energy
+
+    @callback
+    def _handle_export_change(self, event: Event[EventStateChangedData]) -> None:
+        """Handle export energy change with per-period netting."""
         new_state = event.data.get("new_state")
         if new_state is None or new_state.state in ("unknown", "unavailable"):
             return
@@ -653,31 +734,44 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         except (ValueError, TypeError):
             return
 
-        # Prefer rider-specific export credit rate (RSC/NMB/NM)
-        rider_credit = _get_export_credit_rate(
-            self._rate_coordinator, self._optional_riders
-        )
-        if rider_credit is not None:
-            rate = rider_credit
-        else:
-            # Fall back to TOU-aware retail rate
-            rate = _get_tou_rate(self._rate_coordinator, self._tou_coordinator)
-            if rate is None:
-                rate = _get_flat_rate(self._rate_coordinator)
-            if rate is None:
-                return
-            if self._include_riders:
-                rate += _get_rider_adder(self._rate_coordinator)
-
-        if self._last_energy_value is not None:
-            delta = new_energy - self._last_energy_value
+        if self._last_export_value is not None:
+            delta = new_energy - self._last_export_value
             if delta > 0:
-                self._accumulated_credit += delta * rate
+                self._period_exports += delta
+
+                # Determine how much of this delta gets retail vs NEEC rate
+                retail_rate = _get_tou_rate(self._rate_coordinator, self._tou_coordinator)
+                if retail_rate is None:
+                    retail_rate = _get_flat_rate(self._rate_coordinator)
+                if retail_rate is None:
+                    self._last_export_value = new_energy
+                    return
+                if self._include_riders:
+                    retail_rate += _get_rider_adder(self._rate_coordinator)
+
+                neec_rate = _get_export_credit_rate(
+                    self._rate_coordinator, self._optional_riders
+                )
+
+                # How many kWh of exports can still offset imports at retail?
+                remaining_offset = max(self._period_imports - (self._period_exports - delta), 0)
+
+                if remaining_offset >= delta:
+                    # All of this delta offsets imports → full retail credit
+                    self._accumulated_credit += delta * retail_rate
+                elif remaining_offset > 0:
+                    # Partially offsets, rest at NEEC
+                    self._accumulated_credit += remaining_offset * retail_rate
+                    excess = delta - remaining_offset
+                    self._accumulated_credit += excess * (neec_rate if neec_rate else 0.0)
+                else:
+                    # All excess → NEEC rate
+                    self._accumulated_credit += delta * (neec_rate if neec_rate else 0.0)
             elif delta < 0:
                 # Meter reset
                 pass
 
-        self._last_energy_value = new_energy
+        self._last_export_value = new_energy
         self.async_write_ha_state()
 
     @property
@@ -690,29 +784,35 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         if self._tou_coordinator.data:
             tou_period = self._tou_coordinator.data.get("period")
 
-        rider_credit = _get_export_credit_rate(
+        retail_rate = _get_tou_rate(self._rate_coordinator, self._tou_coordinator)
+        if retail_rate is None:
+            retail_rate = _get_flat_rate(self._rate_coordinator)
+        rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
+        if retail_rate is not None:
+            retail_rate += rider_adder
+
+        neec_rate = _get_export_credit_rate(
             self._rate_coordinator, self._optional_riders
         )
-        if rider_credit is not None:
-            effective_rate = rider_credit
-            rate_source = "rider_credit"
-        else:
-            effective_rate = _get_tou_rate(
-                self._rate_coordinator, self._tou_coordinator
-            )
-            rider_adder = _get_rider_adder(self._rate_coordinator) if self._include_riders else 0.0
-            if effective_rate is not None:
-                effective_rate += rider_adder
-            rate_source = "retail_rate"
+
+        remaining_offset = max(self._period_imports - self._period_exports, 0)
+        netting_status = "offset" if remaining_offset > 0 else "excess"
 
         return {
             "source_entity": self._source_entity,
-            "credit_rate_per_kwh": round(effective_rate, 6) if effective_rate is not None else None,
-            "rate_source": rate_source,
+            "grid_in_entity": self._grid_in_entity,
+            "retail_rate_per_kwh": round(retail_rate, 6) if retail_rate is not None else None,
+            "neec_rate_per_kwh": round(neec_rate, 6) if neec_rate is not None else None,
+            "current_rate": "retail" if netting_status == "offset" else "neec",
             "optional_riders": self._optional_riders,
             "include_riders": self._include_riders,
             "current_tou_period": tou_period,
-            "last_energy_value": self._last_energy_value,
+            "period_imports": round(self._period_imports, 3),
+            "period_exports": round(self._period_exports, 3),
+            "period_remaining_offset": round(remaining_offset, 3),
+            "netting_status": netting_status,
+            "last_export_value": self._last_export_value,
+            "last_import_value": self._last_import_value,
         }
 
 
