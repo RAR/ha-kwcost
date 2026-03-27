@@ -152,6 +152,19 @@ class KwcostBaseRateSensor(CoordinatorEntity[KwcostRateCoordinator], SensorEntit
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "base_rate"
 
+    @callback
+    def _handle_tou_update(self) -> None:
+        """Re-evaluate state when TOU period changes."""
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to both rate and TOU coordinator updates."""
+        await super().async_added_to_hass()
+        if self._tou_coordinator:
+            self.async_on_remove(
+                self._tou_coordinator.async_add_listener(self._handle_tou_update)
+            )
+
     @property
     def native_value(self) -> float | None:
         if not self.coordinator.data:
@@ -212,6 +225,19 @@ class KwcostEffectiveRateSensor(CoordinatorEntity[KwcostRateCoordinator], Sensor
         self._attr_unique_id = f"{entry.entry_id}_effective_rate"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "effective_rate"
+
+    @callback
+    def _handle_tou_update(self) -> None:
+        """Re-evaluate state when TOU period changes."""
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to both rate and TOU coordinator updates."""
+        await super().async_added_to_hass()
+        if self._tou_coordinator:
+            self.async_on_remove(
+                self._tou_coordinator.async_add_listener(self._handle_tou_update)
+            )
 
     @property
     def native_value(self) -> float | None:
