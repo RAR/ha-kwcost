@@ -87,21 +87,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         break
 
                 # Find all cost sensors for this entry
-                entity_reg = hass.helpers.entity_registry.async_get(hass)
-                for entity_entry in entity_reg.entities.get_entries_for_config_entry_id(eid):
-                    state = hass.states.get(entity_entry.entity_id)
-                    if state is None:
-                        continue
-                    # Get the actual sensor object
-                    entity_comp = hass.data.get("entity_components", {}).get("sensor")
-                    if entity_comp is None:
-                        continue
-                    entity = entity_comp.get_entity(entity_entry.entity_id)
-                    if isinstance(entity, (KwcostGridCostSensor, KwcostGridExportCreditSensor)):
-                        result = await entity.async_recalculate_from_history(
-                            api_client, tou_sched or None, days=days
-                        )
-                        results.append(result)
+                from homeassistant.helpers import entity_registry as er
+                entity_reg = er.async_get(hass)
+                entity_platform = hass.data.get("entity_platform", {}).get(DOMAIN, [])
+
+                # Collect sensor entities from the platform
+                for platform in entity_platform:
+                    for entity in platform.entities.values():
+                        if entity.registry_entry and entity.registry_entry.config_entry_id == eid:
+                            if isinstance(entity, (KwcostGridCostSensor, KwcostGridExportCreditSensor)):
+                                result = await entity.async_recalculate_from_history(
+                                    api_client, tou_sched or None, days=days
+                                )
+                                results.append(result)
 
             return {"results": results}
 
