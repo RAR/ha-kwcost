@@ -55,6 +55,8 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._client: KwcostApiClient | None = None
         self._api_key: str = ""
+        self._jurisdiction: str = ""
+        self._category: str = ""
         self._jurisdictions: dict[str, Any] = {}
         self._tou_schedules: dict[str, Any] = {}
         self._schedule_data: dict[str, Any] = {}
@@ -75,7 +77,10 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self._client.async_validate()
             except KwcostApiError as err:
                 _LOGGER.error("API key validation failed: %s", err)
-                errors["base"] = "invalid_auth"
+                if err.status in (401, 403):
+                    errors["base"] = "invalid_auth"
+                else:
+                    errors["base"] = "cannot_connect"
             else:
                 try:
                     rates_data = await self._client.async_get_jurisdictions()
@@ -100,12 +105,44 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_schedule(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 2: Select jurisdiction, category, schedule, and TOU schedule."""
+        """Step 2: Select jurisdiction and category."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            jurisdiction = user_input[CONF_JURISDICTION]
-            category = user_input[CONF_CATEGORY]
+            self._jurisdiction = user_input[CONF_JURISDICTION]
+            self._category = user_input[CONF_CATEGORY]
+            return await self.async_step_rate_schedule()
+
+        # Build dropdown options from fetched data
+        jurisdiction_options = {
+            code: f"{code} — {info.get('name', code)}"
+            for code, info in self._jurisdictions.items()
+        }
+
+        category_options = {"residential": "Residential", "business": "Business"}
+
+        return self.async_show_form(
+            step_id="schedule",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_JURISDICTION): vol.In(jurisdiction_options),
+                    vol.Required(CONF_CATEGORY, default="residential"): vol.In(
+                        category_options
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_rate_schedule(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3: Select rate schedule and TOU schedule for the chosen jurisdiction/category."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            jurisdiction = self._jurisdiction
+            category = self._category
             schedule = user_input[CONF_SCHEDULE]
             tou_schedule = user_input.get(CONF_TOU_SCHEDULE, "")
 
@@ -142,22 +179,12 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
 
             return await self.async_step_energy()
 
-        # Build dropdown options from fetched data
-        jurisdiction_options = {
-            code: f"{code} — {info.get('name', code)}"
-            for code, info in self._jurisdictions.items()
+        # Only offer schedules valid for the selected jurisdiction + category
+        jur_info = self._jurisdictions.get(self._jurisdiction, {})
+        cat_schedules = jur_info.get("schedules", {}).get(self._category, {})
+        schedule_options = {
+            code: f"{code} — {name}" for code, name in cat_schedules.items()
         }
-
-        # Collect all categories and schedules across jurisdictions
-        category_options = {"residential": "Residential", "business": "Business"}
-
-        schedule_options: dict[str, str] = {}
-        for jur_info in self._jurisdictions.values():
-            schedules = jur_info.get("schedules", {})
-            for cat_schedules in schedules.values():
-                if isinstance(cat_schedules, dict):
-                    for code, name in cat_schedules.items():
-                        schedule_options[code] = f"{code} — {name}"
 
         tou_options = {"": "(None — no TOU tracking)"}
         for sched_key, sched_info in self._tou_schedules.items():
@@ -165,13 +192,9 @@ class KwcostConfigFlow(ConfigFlow, domain=DOMAIN):
             tou_options[sched_key] = desc
 
         return self.async_show_form(
-            step_id="schedule",
+            step_id="rate_schedule",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_JURISDICTION): vol.In(jurisdiction_options),
-                    vol.Required(CONF_CATEGORY, default="residential"): vol.In(
-                        category_options
-                    ),
                     vol.Required(CONF_SCHEDULE): vol.In(schedule_options),
                     vol.Optional(CONF_TOU_SCHEDULE, default=""): vol.In(
                         tou_options

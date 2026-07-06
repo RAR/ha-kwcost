@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, NoReturn
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import KwcostApiClient, KwcostApiError
 from .const import DOMAIN, UPDATE_INTERVAL_RATES, UPDATE_INTERVAL_TOU, UPDATE_INTERVAL_TARIFF
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _raise_for_api_error(err: KwcostApiError) -> NoReturn:
+    """Translate an API error into the appropriate coordinator exception."""
+    if err.status in (401, 403):
+        raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
+    raise UpdateFailed(f"API error: {err}") from err
 
 
 class KwcostRateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -47,9 +55,7 @@ class KwcostRateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return {"rate": rate_data, "riders": riders_data}
         except KwcostApiError as err:
-            raise UpdateFailed(f"Authentication failed: {err}") from err
-        except KwcostApiError as err:
-            raise UpdateFailed(f"API error: {err}") from err
+            _raise_for_api_error(err)
 
 
 class KwcostTouCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -74,9 +80,7 @@ class KwcostTouCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             return await self.client.async_get_tou_now(self.tou_schedule)
         except KwcostApiError as err:
-            raise UpdateFailed(f"Authentication failed: {err}") from err
-        except KwcostApiError as err:
-            raise UpdateFailed(f"API error: {err}") from err
+            _raise_for_api_error(err)
 
 
 class KwcostTariffCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -112,6 +116,4 @@ class KwcostTariffCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self.rate_schedule,
             )
         except KwcostApiError as err:
-            raise UpdateFailed(f"Authentication failed: {err}") from err
-        except KwcostApiError as err:
-            raise UpdateFailed(f"API error: {err}") from err
+            _raise_for_api_error(err)

@@ -5,15 +5,22 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import aiohttp
 from aiohttp import ClientSession
 
 from .const import API_BASE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
 
 class KwcostApiError(Exception):
     """Base exception for API errors."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class KwcostApiClient:
@@ -26,18 +33,29 @@ class KwcostApiClient:
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         """Make an API request with API key auth."""
         headers = {"x-api-key": self._api_key}
-        resp = await self._session.request(
-            method, f"{API_BASE_URL}{path}", headers=headers, **kwargs
-        )
+        try:
+            resp = await self._session.request(
+                method,
+                f"{API_BASE_URL}{path}",
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+                **kwargs,
+            )
 
-        if resp.status == 403:
-            raise KwcostApiError("Invalid or missing API key")
+            if resp.status in (401, 403):
+                raise KwcostApiError(
+                    "Invalid or missing API key", status=resp.status
+                )
 
-        if resp.status >= 400:
-            text = await resp.text()
-            raise KwcostApiError(f"API error {resp.status}: {text}")
+            if resp.status >= 400:
+                text = await resp.text()
+                raise KwcostApiError(
+                    f"API error {resp.status}: {text}", status=resp.status
+                )
 
-        return await resp.json()
+            return await resp.json()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise KwcostApiError(f"Connection error: {err}") from err
 
     async def async_get_jurisdictions(self) -> dict[str, Any]:
         """GET /rates/ — list all jurisdictions."""

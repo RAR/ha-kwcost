@@ -9,11 +9,17 @@
         }
       },
       "schedule": {
-        "title": "Select Rate Schedule",
-        "description": "Choose your jurisdiction, rate schedule, and optional TOU schedule.",
+        "title": "Select Jurisdiction",
+        "description": "Choose your Duke Energy jurisdiction and customer category.",
         "data": {
           "jurisdiction": "Jurisdiction",
-          "category": "Category",
+          "category": "Category"
+        }
+      },
+      "rate_schedule": {
+        "title": "Select Rate Schedule",
+        "description": "Choose your rate schedule and optional TOU schedule.",
+        "data": {
           "schedule": "Rate Schedule",
           "tou_schedule": "TOU Schedule (optional)",
           "municipality": "Municipality (optional)"

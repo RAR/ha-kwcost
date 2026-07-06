@@ -19,6 +19,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -316,7 +317,6 @@ class KwcostBaseFacilityChargeSensor(
 
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "$"
-    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_icon = "mdi:cash-lock"
 
@@ -487,7 +487,7 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "$"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:currency-usd"
     _attr_suggested_display_precision = 2
 
@@ -629,6 +629,10 @@ class KwcostGridCostSensor(RestoreEntity, SensorEntity):
         old_cost = self._accumulated_cost
         self._accumulated_cost = accumulated
         self._last_energy_value = last_value
+        # The recalculated total may be lower than the previous state.  Mark
+        # this as a meter reset (state_class TOTAL) so long-term statistics
+        # start a new cycle instead of recording a large negative delta.
+        self._attr_last_reset = dt_util.utcnow() - timedelta(days=days)
         self.async_write_ha_state()
 
         summary = {
@@ -720,7 +724,7 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "$"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:solar-power-variant"
     _attr_suggested_display_precision = 2
 
@@ -949,6 +953,10 @@ class KwcostGridExportCreditSensor(RestoreEntity, SensorEntity):
         self._current_period = current_period
         self._period_imports = period_imports
         self._period_exports = period_exports
+        # The recalculated total may be lower than the previous state.  Mark
+        # this as a meter reset (state_class TOTAL) so long-term statistics
+        # start a new cycle instead of recording a large negative delta.
+        self._attr_last_reset = dt_util.utcnow() - timedelta(days=days)
         self.async_write_ha_state()
 
         result = {
@@ -1105,7 +1113,6 @@ class KwcostOptionalRiderSensor(
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "$"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:solar-panel"
 
     def __init__(
@@ -1124,25 +1131,34 @@ class KwcostOptionalRiderSensor(
 
     @property
     def native_value(self) -> float | None:
-        """Estimated monthly fixed charges from selected optional riders."""
+        """Estimated monthly fixed charges from selected optional riders.
+
+        Sums fixed monthly charges and per-kW charges (scaled by the configured
+        nameplate capacity).  Credits count as negative.  Per-kWh items are
+        excluded — they require usage data and are handled by the cost sensors.
+        """
         if not self.coordinator.data:
             return None
         optional = self.coordinator.data.get("riders", {}).get("optional_riders", {})
         total = 0.0
         for code in self._rider_codes:
             rider = optional.get(code, {})
-            # Fixed charges are a flat dict: {"daily_service_charge_dollars": 0.48, ...}
-            fixed = rider.get("fixed_charges", {})
-            if isinstance(fixed, dict):
-                for _key, value in fixed.items():
-                    if isinstance(value, (int, float)):
-                        total += value
-            # Also check charges dict for per-kW items
-            charges = rider.get("charges", {})
-            if isinstance(charges, dict):
-                for key, value in charges.items():
-                    if "per_kw" in key and isinstance(value, (int, float)) and self._nameplate_kw > 0:
-                        total += value * self._nameplate_kw
+            # Charges are a list of {description, value, unit, type} objects
+            charges = rider.get("charges", [])
+            if not isinstance(charges, list):
+                continue
+            for charge in charges:
+                if not isinstance(charge, dict):
+                    continue
+                value = charge.get("value")
+                if not isinstance(value, (int, float)):
+                    continue
+                sign = -1.0 if charge.get("type") == "credit" else 1.0
+                unit = charge.get("unit")
+                if unit == "fixed":
+                    total += sign * value
+                elif unit == "per_kw" and self._nameplate_kw > 0:
+                    total += sign * value * self._nameplate_kw
         return round(total, 2)
 
     @property
@@ -1158,16 +1174,10 @@ class KwcostOptionalRiderSensor(
             rider = optional.get(code, {})
             if rider:
                 attrs[f"{code}_name"] = rider.get("name", code)
-                charges = rider.get("charges", {})
-                if isinstance(charges, dict):
-                    for key, value in charges.items():
-                        attr_key = f"{code}_{key}"
-                        attrs[attr_key] = value
-                fixed = rider.get("fixed_charges", {})
-                if isinstance(fixed, dict):
-                    for key, value in fixed.items():
-                        attr_key = f"{code}_{key}"
-                        attrs[attr_key] = value
+                # Charges are a list of {description, value, unit, type} objects
+                charges = rider.get("charges", [])
+                if isinstance(charges, list) and charges:
+                    attrs[f"{code}_charges"] = charges
                 min_bill = rider.get("minimum_bill_dollars")
                 if min_bill:
                     attrs[f"{code}_minimum_bill"] = min_bill

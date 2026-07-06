@@ -87,12 +87,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         break
 
                 # Find all cost sensors for this entry
-                from homeassistant.helpers import entity_registry as er
-                entity_reg = er.async_get(hass)
-                entity_platform = hass.data.get("entity_platform", {}).get(DOMAIN, [])
+                from homeassistant.helpers.entity_platform import async_get_platforms
 
-                # Collect sensor entities from the platform
-                for platform in entity_platform:
+                # Collect sensor entities from this integration's platforms
+                for platform in async_get_platforms(hass, DOMAIN):
                     for entity in platform.entities.values():
                         if entity.registry_entry and entity.registry_entry.config_entry_id == eid:
                             if isinstance(entity, (KwcostGridCostSensor, KwcostGridExportCreditSensor)):
@@ -120,6 +118,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
+        # Remove the service when the last config entry unloads
+        if not hass.data[DOMAIN]:
+            hass.services.async_remove(DOMAIN, SERVICE_RECALCULATE)
     return unload_ok
 
 
